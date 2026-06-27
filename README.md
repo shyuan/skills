@@ -48,6 +48,9 @@ folders directly or via tooling such as [`npx skills add`](https://github.com/ve
 [MIT](./LICENSE).
 
 The file-type review checklists under
-[`skills/opencode-review/prompts/rules/`](./skills/opencode-review/prompts/rules) are derived from
-Alibaba's [open-code-review](https://github.com/alibaba/open-code-review) (Apache-2.0); see
-[`ATTRIBUTION.md`](./skills/opencode-review/prompts/rules/ATTRIBUTION.md) in that directory.
+[`skills/opencode-review/prompts/rules/`](./skills/opencode-review/prompts/rules) — except `go.md`,
+which is original — are **unmodified, verbatim copies** from Alibaba's
+[open-code-review](https://github.com/alibaba/open-code-review) (Copyright 2026 Alibaba, Apache-2.0).
+A copy of the Apache-2.0 license travels with them as
+[`rules/LICENSE`](./skills/opencode-review/prompts/rules/LICENSE); see
+[`ATTRIBUTION.md`](./skills/opencode-review/prompts/rules/ATTRIBUTION.md) in that directory for details.
