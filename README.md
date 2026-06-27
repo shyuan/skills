@@ -43,6 +43,11 @@ explicitly via its `name`.
 Other agents that support the `SKILL.md` standard (OpenCode, Cursor, Cline, …) can consume these
 folders directly or via tooling such as [`npx skills add`](https://github.com/vercel-labs/skills).
 
+## Contributing
+
+New skills are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for the folder layout,
+`SKILL.md` conventions, and how to bundle third-party content.
+
 ## License
 
 [MIT](./LICENSE).
