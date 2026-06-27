@@ -1,8 +1,15 @@
 # Rule docs attribution
 
-The `*.md` rule checklists in this directory are derived from Alibaba's
-**open-code-review** project (`internal/config/rules/rule_docs/`), licensed under
-the Apache License 2.0.
+Except for `go.md` (see below), the `*.md` rule checklists in this directory are
+**unmodified, verbatim copies** of files from Alibaba's **open-code-review**
+project (`internal/config/rules/rule_docs/`):
+
+> Copyright 2026 Alibaba
+> Licensed under the Apache License, Version 2.0.
+
+A full copy of the Apache License 2.0 is bundled alongside these files as
+[`LICENSE`](./LICENSE), as required by section 4(a) of that license. The copied
+files have not been changed; `go.md` is the only original addition.
 
 They are bundled here so the OpenCode reviewer committee can inject a
 file-type-specific review checklist into each member's persona — mirroring how
