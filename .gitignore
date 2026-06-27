@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Editor / local agent config
+.claude/settings.local.json
+.idea/
+.vscode/
+
+# Logs / scratch
+*.log
