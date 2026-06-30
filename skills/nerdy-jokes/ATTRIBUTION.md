@@ -1,6 +1,6 @@
 # Joke corpus attribution
 
-`references/jokes.json` is a **merged and reformatted** collection (702 jokes),
+`references/jokes.json` is a **merged and reformatted** collection (700 jokes),
 not a verbatim copy of any single upstream project. Each entry carries a
 `source` field recording where it came from. The jokes were normalized into a
 common schema (`content`, `lang`, `source`, `category`, `tags`) and re-tagged
@@ -11,7 +11,7 @@ for this skill; the original joke text is preserved.
 | `source` value | Count | Origin | License |
 |---|---|---|---|
 | `pyjokes` | 287 | [pyjokes/pyjokes](https://github.com/pyjokes/pyjokes) | BSD-3-Clause |
-| `jokekappa-*` | 232 | [vinta/JokeKappa](https://github.com/vinta/JokeKappa) | MIT |
+| `jokekappa-*` | 230 | [vinta/JokeKappa](https://github.com/vinta/JokeKappa) | MIT |
 | `curated` | 183 | Original STEM collection written for this skill | MIT (this repo) |
 
 `jokekappa-*` covers the `jokekappa-codetengu_weekly`,
