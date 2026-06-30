@@ -41,8 +41,13 @@ EXPLAIN_PATTERNS = [
 CJK = re.compile(r"[\u4e00-\u9fff]")
 
 
-def blockquote_lines(text: str) -> list[str]:
-    """Return lines starting with '> ' (excluding code fences)."""
+def non_blockquote_text(text: str) -> str:
+    """Return the prose outside blockquotes (and code fences).
+
+    Announcement/explanation checks must not inspect the joke itself: a joke's
+    own wording can legitimately contain phrases like "the punchline is", which
+    would otherwise be a false positive.
+    """
     lines = []
     in_fence = False
     for line in text.splitlines():
@@ -50,11 +55,10 @@ def blockquote_lines(text: str) -> list[str]:
         if stripped.startswith("```"):
             in_fence = not in_fence
             continue
-        if in_fence:
+        if in_fence or stripped.startswith(">"):
             continue
-        if stripped.startswith(">"):
-            lines.append(stripped.lstrip("> ").rstrip())
-    return [l for l in lines if l]
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def blockquote_groups(text: str) -> list[str]:
@@ -88,6 +92,7 @@ def blockquote_groups(text: str) -> list[str]:
 def grade(assertion_id: str, text: str) -> tuple[bool, str]:
     groups = blockquote_groups(text)
     quoted = " ".join(groups)
+    prose = non_blockquote_text(text)
 
     if assertion_id == "joke_delivered":
         ok = len(groups) >= 1
@@ -107,14 +112,14 @@ def grade(assertion_id: str, text: str) -> tuple[bool, str]:
 
     if assertion_id == "no_announcement":
         for pat in ANNOUNCE_PATTERNS:
-            m = re.search(pat, text, re.IGNORECASE)
+            m = re.search(pat, prose, re.IGNORECASE)
             if m:
                 return False, f"matched announcement: {m.group(0)!r}"
         return True, "no announcement phrase found"
 
     if assertion_id == "no_explanation":
         for pat in EXPLAIN_PATTERNS:
-            m = re.search(pat, text, re.IGNORECASE)
+            m = re.search(pat, prose, re.IGNORECASE)
             if m:
                 return False, f"matched explanation: {m.group(0)!r}"
         return True, "no explanation phrase found"

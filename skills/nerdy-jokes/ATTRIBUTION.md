@@ -18,23 +18,28 @@ for this skill; the original joke text is preserved.
 `jokekappa-others`, `jokekappa-pyjokes`, and `jokekappa-kobeengineer`
 sub-sources, all drawn from the JokeKappa dataset.
 
+The full upstream license texts are bundled alongside this file, as their
+redistribution terms require:
+
+- pyjokes (BSD-3-Clause) — [`LICENSE-pyjokes.txt`](./LICENSE-pyjokes.txt)
+- JokeKappa (MIT) — [`LICENSE-jokekappa.txt`](./LICENSE-jokekappa.txt)
+
 ### pyjokes — BSD-3-Clause
 
-> Copyright (c) 2014, Pyjokes contributors. All rights reserved.
+> Copyright 2014- Pyjokes Society
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the conditions of the
-[BSD 3-Clause License](https://github.com/pyjokes/pyjokes/blob/master/LICENSE)
-are met. The joke text is redistributed unmodified; only the surrounding data
-format and tags were added.
+Redistributed under the [BSD 3-Clause License](./LICENSE-pyjokes.txt), whose
+full text (including the required copyright notice, conditions, and disclaimer)
+is bundled as `LICENSE-pyjokes.txt`. The joke text is redistributed unmodified;
+only the surrounding data format and tags were added.
 
 ### JokeKappa — MIT
 
-> Copyright (c) Vinta Chen and contributors.
+> Copyright (c) 2017 CodeTengu
 
-Permission is granted under the
-[MIT License](https://github.com/vinta/JokeKappa/blob/master/LICENSE) to use,
-copy, and redistribute the data. The joke text is redistributed unmodified.
+Redistributed under the [MIT License](./LICENSE-jokekappa.txt), whose full text
+is bundled as `LICENSE-jokekappa.txt`. The joke text is redistributed
+unmodified.
 
 ### Curated STEM jokes
 

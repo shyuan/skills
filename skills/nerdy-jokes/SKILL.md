@@ -14,7 +14,7 @@ description: >
 
 # Nerdy Jokes
 
-702 one-liner jokes (418 English, 284 Traditional Chinese) spanning programming
+700 one-liner jokes (418 English, 282 Traditional Chinese) spanning programming
 and STEM disciplines. Each joke is tagged by topic for contextual delivery.
 
 Sources:
@@ -29,11 +29,11 @@ Tell at most one joke per session. Treat it like seasoning.
 
 ## Tags
 
-### Programming (462 jokes)
+### Programming (517 jokes)
 
 | Tag | Count | Matches when... |
 |---|---|---|
-| `work-culture` | 92 | meetings, deadlines, overtime, scrum, career |
+| `work-culture` | 90 | meetings, deadlines, overtime, scrum, career |
 | `algorithms` | 85 | recursion, threads, data structures, complexity |
 | `languages` | 73 | Java, Python, C++, type systems, compilers |
 | `debugging` | 71 | bugs, errors, testing, fixing, QA |
@@ -48,7 +48,7 @@ Tell at most one joke per session. Treat it like seasoning.
 | `frontend` | 4 | CSS, HTML, browsers |
 | `legacy` | 4 | old code, technical debt |
 
-### STEM (240 jokes)
+### STEM (183 jokes)
 
 | Tag | Count | Matches when... |
 |---|---|---|
@@ -62,6 +62,14 @@ Tell at most one joke per session. Treat it like seasoning.
 | `biology` | 13 | cells, DNA, evolution |
 | `astronomy` | 12 | space, planets, gravity |
 | `engineering` | 10 | mechanical, civil, design |
+
+### Chuck Norris (category, not a tag)
+
+103 Chuck Norris programmer jokes live under `--category chuck` (English) rather
+than the topic tags above. They are exaggerated hero gags ("Chuck Norris can
+divide by zero"), not tied to a specific STEM/programming topic — reach for them
+only when the session tone is playful and a tall-tale punchline fits. Skip them
+in a focused or serious thread.
 
 ## How to pick a joke
 
