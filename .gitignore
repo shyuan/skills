@@ -8,3 +8,7 @@
 
 # Logs / scratch
 *.log
+
+# Python
+__pycache__/
+*.pyc
