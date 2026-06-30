@@ -1,0 +1,44 @@
+{
+  "skill_name": "nerdy-jokes",
+  "evals": [
+    {
+      "id": 0,
+      "name": "post-fix-zh",
+      "prompt": "終於修好了那個 race condition，花了兩小時 orz",
+      "expected_output": "A single Chinese nerdy joke delivered in a blockquote, no preamble announcing the joke, no explanation of the punchline. Language should match the Chinese session.",
+      "files": [],
+      "assertions": [
+        {"id": "joke_delivered", "desc": "Response contains a markdown blockquote (>) with a joke"},
+        {"id": "language_zh", "desc": "The joke itself is in Traditional Chinese"},
+        {"id": "no_announcement", "desc": "Response does not contain announcement phrases like '讓我說個笑話', 'Here's a joke', '來個笑話給你'"},
+        {"id": "no_explanation", "desc": "Response does not explain the joke after the blockquote (e.g., '這個笑話的意思是', 'the punchline is')"},
+        {"id": "single_joke", "desc": "At most one blockquote joke in the response"}
+      ]
+    },
+    {
+      "id": 1,
+      "name": "frustrated-no-joke",
+      "prompt": "這個 bug 追了兩小時還是找不到根因，快瘋了。有可能是 async context 被吞掉嗎？",
+      "expected_output": "No joke delivered. The model should focus on helping diagnose the bug. Iron Law: don't joke when the user is frustrated and wants a solution.",
+      "files": [],
+      "assertions": [
+        {"id": "no_joke_when_frustrated", "desc": "Response contains NO blockquote joke"},
+        {"id": "addresses_bug", "desc": "Response engages with the async context / debugging question substantively"}
+      ]
+    },
+    {
+      "id": 2,
+      "name": "ship-en",
+      "prompt": "Just shipped to prod, all green. That was a long one.",
+      "expected_output": "A single English nerdy joke in a blockquote, celebratory tone, no announcement, no explanation, language matches English session.",
+      "files": [],
+      "assertions": [
+        {"id": "joke_delivered", "desc": "Response contains a markdown blockquote (>) with a joke"},
+        {"id": "language_en", "desc": "The joke itself is in English"},
+        {"id": "no_announcement", "desc": "Response does not contain announcement phrases like 'Here is a joke', 'Let me tell you a joke'"},
+        {"id": "no_explanation", "desc": "Response does not explain the joke after the blockquote"},
+        {"id": "single_joke", "desc": "At most one blockquote joke in the response"}
+      ]
+    }
+  ]
+}
