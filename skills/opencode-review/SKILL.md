@@ -115,9 +115,14 @@ These are already true in the user's environment; only check them if the run fai
   `mode:subagent`-as-top-level self-replication fork bomb.
 - `--pure` skips external plugins, so startup is lean and there's no port to collide on.
 - `OPENCODE_PERMISSION` is set **for this run only** (the saved config is untouched):
-  `edit` and mutating `git`/`rm` bash commands are denied so the review can't touch the work
-  tree (the diff may be uncommitted); `question` and `doom_loop` are denied so the run can't
-  stall waiting for input that will never come headless.
+  `edit` is denied, and bash is **default-deny with a read-only allow-list** (git reads plus
+  `cat`/`head`/`tail`/`wc`/`ls`/`grep`/`rg`). Trailing deny patterns for shell metacharacters
+  (`;`, `|`, `&`, `>`, backticks, `$(`, `<(`, newline) override the allows, so an allowed
+  prefix can't smuggle chained commands, pipes into a shell, or redirection writes. The diff
+  under review is untrusted input to the reviewer models, so this hardens against prompt
+  injection as well as keeping the (possibly uncommitted) work tree read-only — though glob
+  matching makes it defense-in-depth, not a hard sandbox. `question` and `doom_loop` are
+  denied so the run can't stall waiting for input that will never come headless.
 - `GIT_PAGER=cat` / `PAGER=cat` stop git from opening a pager that would hang in a non-TTY.
 - The two members run in parallel, then the chair runs once, then the optional fact-check runs
   once — so a large diff can take a few minutes. Each model run has its own timeout; a hung

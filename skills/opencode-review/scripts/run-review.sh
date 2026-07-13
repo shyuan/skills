@@ -212,32 +212,32 @@ changed_files() {
 
 # build_rules_block prints a checklist section (union of matched rule docs, with
 # the files each one covers), or nothing when disabled / no files / no docs.
+# Filenames from git are untrusted input: they are only ever passed around as
+# data (variables, pipes), never re-parsed by the shell — no eval anywhere.
 build_rules_block() {
   [ "$RULES_ENABLED" = "0" ] && return 0
   [ -d "$RULES_DIR" ] || return 0
 
-  local files doc seen="" line out=""
+  local files doc docs="" f cov out=""
   files="$(changed_files | sed '/^$/d' | sort -u)"
   [ -z "$files" ] && return 0
 
-  # Collect distinct rule docs, remembering which files each covers.
-  local docs="" f
+  # Pass 1: the distinct rule docs, in first-appearance order.
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     doc="$(map_rule "$f")"
     case " $docs " in *" $doc "*) ;; *) docs="$docs $doc" ;; esac
-    eval "files_for_$(printf '%s' "$doc" | tr '.-' '__')=\"\${files_for_$(printf '%s' "$doc" | tr '.-' '__'):-}\$f
-\""
   done <<EOF
 $files
 EOF
 
+  # Pass 2: per doc, re-match to list the files it covers.
   for doc in $docs; do
     [ -f "$RULES_DIR/$doc" ] || continue
-    local key cov
-    key="files_for_$(printf '%s' "$doc" | tr '.-' '__')"
-    eval "cov=\"\${$key}\""
-    cov="$(printf '%s' "$cov" | sed '/^$/d' | paste -sd ', ' -)"
+    cov="$(printf '%s\n' "$files" | while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      [ "$(map_rule "$f")" = "$doc" ] && printf '%s\n' "$f"
+    done | paste -sd ', ' -)"
     out="${out}
 ### Checklist for: ${cov}
 $(cat "$RULES_DIR/$doc")
@@ -250,13 +250,23 @@ $(cat "$RULES_DIR/$doc")
 
 # ---------------------------------------------------- headless run permissions
 # Applied ONLY to this run via OPENCODE_PERMISSION; the saved config is untouched.
+# opencode evaluates bash patterns LAST-match-wins, so the order inside "bash" is
+# load-bearing: default deny first, read-only allows next, and metacharacter
+# denies last so they override every allow.
 #   edit deny            -> read-only review (defense-in-depth over the models)
 #   question deny        -> a run cannot stall waiting for input
 #   doom_loop deny       -> a repeated identical tool call cannot stall on approval
-#   bash "*" allow       -> git reads etc. run without prompting ...
-#   bash <mutating> deny -> ...but block anything that could alter the work tree,
-#                           since the diff under review may still be uncommitted.
-PERM='{"edit":"deny","question":"deny","doom_loop":"deny","bash":{"*":"allow","rm *":"deny","git reset*":"deny","git checkout *":"deny","git switch*":"deny","git restore*":"deny","git clean*":"deny","git commit*":"deny","git push*":"deny","git stash*":"deny","git rebase*":"deny","git merge*":"deny"}}'
+#   bash "*" deny        -> default-deny: the diff under review is untrusted input
+#                           to the reviewer models (prompt injection), so only the
+#                           read-only commands below are allowed.
+#   read-only allows     -> git reads + cat/head/tail/wc/ls/grep/rg; enough for
+#                           the personas' "read related repo files" instruction.
+#   metachar denies      -> ; | & > ` $( <( and newline: an allowed prefix cannot
+#                           smuggle chained commands, pipes-to-shell, command
+#                           substitution, or redirection writes. Costs the models
+#                           regex alternation ('a|b') in grep args — acceptable.
+# This is defense-in-depth over glob matching, not a hard sandbox.
+PERM='{"edit":"deny","question":"deny","doom_loop":"deny","bash":{"*":"deny","git diff*":"allow","git show*":"allow","git log*":"allow","git status*":"allow","git ls-files*":"allow","git rev-parse*":"allow","git blame*":"allow","git grep*":"allow","cat *":"allow","head *":"allow","tail *":"allow","wc *":"allow","ls":"allow","ls *":"allow","grep *":"allow","rg *":"allow","*;*":"deny","*|*":"deny","*&*":"deny","*>*":"deny","*`*":"deny","*$(*":"deny","*<(*":"deny","*\n*":"deny"}}'
 
 swe_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-swe.$$")"
 arch_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-arch.$$")"
