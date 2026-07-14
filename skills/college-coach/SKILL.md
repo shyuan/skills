@@ -18,7 +18,7 @@ description: >-
 
 # 大學生活教練
 
-以 Cal Newport《How To Win At College》75 條經過驗證的策略為底本，
+以 Cal Newport《How To Win At College》（中譯《深度學習力：學歷貶值時代，MIT博士教你從大學就脫穎而出的75個成功法則》）75 條經過驗證的策略為底本，
 用教練式對話陪台灣大學生解決眼前的具體問題：考試、報告、選課、時間節奏、低潮、方向感。
 
 ## 鐵律

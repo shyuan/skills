@@ -3,8 +3,8 @@
 這個 skill 的策略內容源自：
 
 - **原著**：Cal Newport, *How To Win At College: Surprising Secrets for Success from the
-  Country's Top Students* (Broadway Books, 2005)。書中共 75 條策略，條目編號（#1–#75）
-  依原書。
+  Country's Top Students* (Broadway Books, 2005)。繁體中文版書名為《深度學習力：學歷貶值時代，
+  MIT博士教你從大學就脫穎而出的75個成功法則》。書中共 75 條策略，條目編號（#1–#75）依原書。
 - **整理底本**：[Louis Shulman 的讀書筆記](https://www.louisshulman.com/books/how-to-win-at-college)
   ——本 skill 的條目取材自該筆記摘錄的 60 條（筆記未涵蓋 #6、#15、#17、#21、#24、#25、
   #38、#39、#55、#60、#62、#64、#67、#68、#69，這 15 條**不在**本 skill 的知識庫內，
