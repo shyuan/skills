@@ -1,0 +1,33 @@
+{
+  "skill_name": "college-coach",
+  "evals": [
+    {
+      "id": 0,
+      "name": "exam-14-day-standard",
+      "prompt": "我下下週四要考微積分期中，範圍好大（極限、微分、連鎖律、隱函數、還有應用題），我現在該怎麼開始準備？",
+      "expected_output": "教練式回應：先確認剩餘天數/題型/目前進度（最多三個問題），引用 #26/#70/#7 展開 14 天 quiz-and-recall 計畫或其起手式，給 1-3 個今天可執行的行動，約定 checkpoint，正體中文",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "paper-deadline-crunch",
+      "prompt": "慘了，通識課的期末報告 3000 字後天就要交，我連題目都還沒完全想好，一個字都沒寫，怎麼辦",
+      "expected_output": "誠實面對 48 小時現實：不責備、不硬套完整三天法，給壓縮版分段計畫（今天訂主張+粗稿、明天論點+編修），警告熬夜（#49），約定 checkpoint",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "sophomore-overwhelm-rhythm",
+      "prompt": "我大二，每天都好累，事情永遠做不完，to-do list 越寫越長，我是不是時間管理很爛啊",
+      "expected_output": "先診斷（固定格子/死線/現行做法/能量曲線）再開藥；區分節奏問題 vs 低潮訊號；核心處方是 #12 time-blocking + #2 週日儀式的起手式，不是倒出全部條目；語氣不說教",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "course-selection-shujuan",
+      "prompt": "下學期我想衝書卷獎，但又怕選到雷課毀掉整學期，選課有什麼策略嗎？",
+      "expected_output": "台灣在地化回應：#3 多選 1-2 門加退選前退掉、停修保險、#57 出席、書卷獎靠制度不靠衝刺、提醒 #56 成績是副產品；先問年級/必修負擔/目標",
+      "files": []
+    }
+  ]
+}
