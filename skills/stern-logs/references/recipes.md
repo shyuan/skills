@@ -25,11 +25,15 @@ stern deploy/api -n prod --no-follow --tail 500 -i 'ERROR|FATAL|panic|Exception'
 stern deploy/api -n prod --no-follow --tail 50 --color never
 ```
 
-When a container has no running instance, stern falls back to the last terminated instance's
-container ID, so the output of the run that crashed is what you get. `--container-state` defaults to
-`all`, so it only ever *restricts* — and `--container-state terminated` is the wrong restriction for
-a crash loop, because a pod in CrashLoopBackOff is `waiting` (backing off before the next restart),
-not `terminated`. It would filter out the very pod being debugged.
+This works **only while the container is still between restarts** — no instance running, backing off.
+In that window stern requests logs exactly as `kubectl logs` without `--previous` does, and the API
+serves the last terminated instance, so what you get is the run that crashed. Once the container
+comes up and stays up, that same command returns the *new* instance instead, and the crashed run is
+reachable only via `kubectl logs --previous` (see the last section).
+
+`--container-state` defaults to `all`, so it only ever *restricts* — and `--container-state
+terminated` is the wrong restriction here, because a pod in CrashLoopBackOff is `waiting` (backing
+off before the next restart), not `terminated`. It would filter out the very pod being debugged.
 
 If the run above prints nothing, the cause is one of:
 
@@ -179,6 +183,10 @@ rules:
 
 - Pod *state*, events, restart counts, OOMKills → `kubectl get pods`, `kubectl describe pod`,
   `kubectl get events`.
-- A single pod, single container, one-shot → `kubectl logs` is fine (and `kubectl logs --previous`
-  reaches the previous container instance, which stern does not expose).
+- A single pod, single container, one-shot → `kubectl logs` is fine.
+- **The previous instance of a container that is running now** → `kubectl logs --previous`. stern
+  sets no `Previous` flag on its log request and has no equivalent option, so it can only ever show
+  the current instance. The exception is the crash-loop window above: while nothing is running, the
+  API serves the last terminated instance to an ordinary request, which is why that recipe works
+  without `--previous`.
 - Logs older than the node's retention → they are gone from the API; query the log backend instead.
