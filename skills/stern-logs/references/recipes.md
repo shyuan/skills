@@ -19,21 +19,33 @@ stern deploy/api -n prod --no-follow --tail 500 -i 'ERROR|FATAL|panic|Exception'
 
 ### CrashLoopBackOff — the logs of the container that already died
 
-A crash-looping container is `terminated` or `waiting`, so a plain tail may show nothing:
+**Do not add a state filter here.** A plain bounded run already gets them:
 
 ```bash
-stern deploy/api -n prod --no-follow --tail 50 --container-state terminated --color never
+stern deploy/api -n prod --no-follow --tail 50 --color never
 ```
 
-The default is already `all`, so this flag *restricts* rather than enables — meaning an empty result
-from a plain run is more often caused by `--since`/`--tail` than by the container state. Reach for
-`--container-state terminated` when you want the dead container's output isolated from the noise of
-the one that just restarted.
+When a container has no running instance, stern falls back to the last terminated instance's
+container ID, so the output of the run that crashed is what you get. `--container-state` defaults to
+`all`, so it only ever *restricts* — and `--container-state terminated` is the wrong restriction for
+a crash loop, because a pod in CrashLoopBackOff is `waiting` (backing off before the next restart),
+not `terminated`. It would filter out the very pod being debugged.
+
+If the run above prints nothing, the cause is one of:
+
+| cause | check |
+|---|---|
+| the window is too narrow | widen `--since` / `--tail`; a container that died an hour ago is outside `--since 5m` |
+| the container never started | no container ID exists, so there are no logs at all — `kubectl describe pod` (image pull, mount, admission) |
+| it crashed before writing anything | `kubectl describe pod` for exit code and reason (137 = OOMKilled) |
+
+Use `--container-state terminated` for a different job: isolating containers that have genuinely
+finished, such as the pods of a completed Job.
 
 ### Init container refuses to finish
 
 ```bash
-stern pod/api-7d9f -n prod --no-follow --tail 100 --container-state all --color never
+stern pod/api-7d9f -n prod --no-follow --tail 100 --color never
 ```
 
 Init containers are included by default (`--init-containers=true`); `-c <name>` picks one out.

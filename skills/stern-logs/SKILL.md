@@ -79,10 +79,10 @@ The positional argument is a **regex on pod names**, unless it has the form `<re
 which is an exact resource lookup:
 
 ```bash
-stern .                       # every pod in the namespace (regex "." matches all)
-stern 'web-\w'                # web-backend, web-frontend — but not web-123
-stern deploy/nginx            # all pods belonging to that Deployment
-stern svc/api --no-follow     # all pods behind that Service
+stern . --no-follow            # every pod in the namespace (regex "." matches all)
+stern 'web-\w' --no-follow     # web-backend, web-frontend — but not web-123
+stern deploy/nginx --no-follow # all pods belonging to that Deployment
+stern svc/api --no-follow      # all pods behind that Service
 ```
 
 Supported resources (with aliases): `pod`/`po`, `replicationcontroller`/`rc`, `service`/`svc`,
@@ -100,7 +100,7 @@ Narrow further with:
 | by field | `--field-selector spec.nodeName=node-1` |
 | by node | `--node node-1` |
 | several namespaces | `-n a,b` (repeatable) / `-A` for all |
-| only crashed containers | `--container-state terminated` |
+| only containers that have already exited (finished Jobs) | `--container-state terminated` |
 | skip init/ephemeral containers | `--init-containers=false`, `--ephemeral-containers=false` |
 
 That table is the working subset. When you need a flag that is not in it, an exact default, or the
@@ -124,9 +124,11 @@ stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
   stern deploy/api --no-follow --max-log-requests 1 --tail 100   # pod by pod, in order
   stern . -A --no-follow --since 5m --only-log-lines -t | sort   # timestamp-first, then sort
   ```
-- `--max-log-requests` defaults to **5 with `--no-follow`** (throttles concurrency) and **50 without**
-  (hard-errors when exceeded). Widening a query across a big namespace hits this — raise the limit
-  explicitly rather than being surprised by a truncated picture.
+- `--max-log-requests` **never silently drops pods.** With `--no-follow` (default 5) it is a
+  concurrency limit: every matching container is still read, just fewer at a time, so the output is
+  complete and only slower. Without `--no-follow` (default 50) exceeding it is a hard error that
+  stops stern with a message naming the flag. Raise it to go faster or to watch more pods — never
+  because you suspect missing output.
 
 ## Machine-readable output
 
@@ -155,8 +157,8 @@ application logs into something readable, see [references/templates.md](referenc
 | `Error: --no-follow cannot be used with --tail=0` | `--tail=0` means "only *new* lines", which contradicts exiting; use `--tail 1` or drop `--no-follow` |
 | `--condition` rejected | it is only supported with `--tail=0` or `--no-follow` |
 | flood of output | `--since 48h` + `--tail -1` defaults across many pods |
-| no logs from a crash-looping pod | its container is `terminated`, not `running` → `--container-state terminated` |
-| output missing pods | `--max-log-requests` limit reached |
+| no logs from a crash-looping pod | not a state-filter problem: the default `--container-state all` already covers it, and stern falls back to the last terminated instance's logs. Check `--since`/`--tail` first. `--container-state terminated` would *exclude* it — CrashLoopBackOff is `waiting` |
+| a container is skipped entirely | it has no container ID yet (never started — image pull failure, etc.); its logs do not exist, use `kubectl describe pod` |
 | ANSI garbage in captured output | `--color never` |
 | `--timestamps` prints nothing | value form matters: `-t`, or `--timestamps=short` with the `=` |
 | running inside a Pod: forbidden | needs RBAC `get,watch,list` on `pods` and `pods/log` |

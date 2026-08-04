@@ -56,46 +56,50 @@ On top of Go's builtins:
 
 ## Examples
 
+Every example below carries `--no-follow --tail 50` because these are copy-ready commands, and
+without it stern streams until the harness times out. Drop the bounding flags only when a human is
+watching the terminal.
+
 Plain custom line:
 
 ```bash
-stern --template '{{printf "%s (%s/%s/%s/%s)\n" .Message .NodeName .Namespace .PodName .ContainerName}}' backend
+stern --template '{{printf "%s (%s/%s/%s/%s)\n" .Message .NodeName .Namespace .PodName .ContainerName}}' backend --no-follow --tail 50
 ```
 
 Keep stern's per-pod colors:
 
 ```bash
-stern --template '{{.Message}} ({{.Namespace}}/{{color .PodColor .PodName}}/{{color .ContainerColor .ContainerName}}){{"\n"}}' backend
+stern --template '{{.Message}} ({{.Namespace}}/{{color .PodColor .PodName}}/{{color .ContainerColor .ContainerName}}){{"\n"}}' backend --no-follow --tail 50
 ```
 
 JSON logs → level + message (non-JSON lines are dropped by `with`):
 
 ```bash
-stern --template='{{.PodName}}/{{.ContainerName}} {{with $d := .Message | parseJSON}}[{{$d.level}}] {{$d.message}}{{end}}{{"\n"}}' backend
+stern --template='{{.PodName}}/{{.ContainerName}} {{with $d := .Message | parseJSON}}[{{$d.level}}] {{$d.message}}{{end}}{{"\n"}}' backend --no-follow --tail 50
 ```
 
 JSON logs with a fallback for plain lines — **the safest general-purpose template**:
 
 ```bash
-stern --template='{{.PodName}}/{{.ContainerName}} {{with $msg := .Message | tryParseJSON}}[{{colorGreen (toRFC3339Nano $msg.ts)}}] {{levelColor $msg.level}} ({{colorCyan $msg.caller}}) {{$msg.msg}}{{else}} {{.Message}} {{end}}{{"\n"}}' backend
+stern --template='{{.PodName}}/{{.ContainerName}} {{with $msg := .Message | tryParseJSON}}[{{colorGreen (toRFC3339Nano $msg.ts)}}] {{levelColor $msg.level}} ({{colorCyan $msg.caller}}) {{$msg.msg}}{{else}} {{.Message}} {{end}}{{"\n"}}' backend --no-follow --tail 50
 ```
 
 Pretty-print whatever is JSON, pass the rest through:
 
 ```bash
-stern --template='{{ .Message | prettyJSON }}{{"\n"}}' backend
+stern --template='{{ .Message | prettyJSON }}{{"\n"}}' backend --no-follow --tail 50
 ```
 
 Nested fields via dot notation — for `{"python": {"levelname": "INFO", "module": "router"}}`:
 
 ```bash
-stern --template='{{ levelColor (extractJSONParts .Message "python.levelname") }} {{ extractJSONParts .Message "python.module" }}{{"\n"}}' backend
+stern --template='{{ levelColor (extractJSONParts .Message "python.levelname") }} {{ extractJSONParts .Message "python.module" }}{{"\n"}}' backend --no-follow --tail 50
 ```
 
 From a file, when the template gets long:
 
 ```bash
-stern --template-file=~/.stern.tpl backend
+stern --template-file=~/.stern.tpl backend --no-follow --tail 50
 ```
 
 ## Custom colors
@@ -105,7 +109,7 @@ so underline / background / 8-bit / 24-bit all work if the terminal supports the
 
 ```bash
 podColors="38;2;255;97;136,38;2;169;220;118,38;2;255;216;102,38;2;120;220;232,38;2;171;157;242"
-stern --pod-colors "$podColors" deploy/app
+stern --pod-colors "$podColors" deploy/app --no-follow --tail 50
 ```
 
 `--container-colors` defaults to `--pod-colors` and must have the same length. Both can live in the
