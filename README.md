@@ -15,6 +15,7 @@ needs at runtime.
 | [`complete-test-code`](./skills/complete-test-code) | Writes, audits, and hardens test code with SQLite-grade rigor — fuzzing, property/differential/metamorphic testing, fault injection, mutation testing, coverage — right-sized to each component's blast radius. |
 | [`opencode-review`](./skills/opencode-review) | Runs a local, headless multi-model "reviewer committee" over your **local** diff *before* a PR is opened, and returns a consolidated report to act on. |
 | [`nerdy-jokes`](./skills/nerdy-jokes) | Delivers one well-placed programming or STEM one-liner (English or 繁中) at transition moments — after a bug fix, green tests, or a clean resolution — drawn from a 700-joke tagged collection. |
+| [`stern-logs`](./skills/stern-logs) | Drives [stern](https://github.com/stern/stern) to read Kubernetes pod logs without hanging the agent — bounded `--no-follow` invocations, pod/resource selection, crash-loop and cross-namespace recipes, plus the full flag and Go-template reference. |
 
 ## Layout
 
