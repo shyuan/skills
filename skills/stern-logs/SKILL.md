@@ -28,12 +28,29 @@ In an agent/non-interactive context, every stern invocation carries --no-follow.
 ```
 
 Without it stern **streams forever and never exits** — the tool call blocks until the harness
-timeout, and the partial output may be discarded. Only drop `--no-follow` when the user explicitly
-asked to watch a live stream, and then run it in the background with a bounded reason to stop.
+timeout, and the partial output may be discarded. The only exception: the user explicitly asked to
+watch a live stream, and it runs as a background command with a stated stop condition.
 
 The second half of the law: **bound the volume**. The defaults are `--since 48h` and `--tail -1`
 (*every* line ever retained), multiplied by every matching pod. Always narrow at least one of
 `--tail` / `--since`.
+
+### Rationalization table
+
+Every one of these will occur to you mid-task. All of them are wrong.
+
+| The thought | Reality |
+|---|---|
+| "This namespace only has two pods, streaming is fine." | Pod count does not make stern exit. Two pods stream forever just as well as fifty. |
+| "The user said 'watch'/'monitor'/'看一下現在的狀況', so they want live output." | They want an *answer*. `--no-follow --since 5m` gives it. Streaming into a blocked tool call gives them nothing. |
+| "I'll add a timeout, that bounds it." | `timeout` exits 124 and can cut a line mid-write, so the harness may surface a failed command instead of your logs. Bound it with stern's own flags; keep `timeout` only as a belt-and-braces outer limit. |
+| "It's idle, it will stop when there's nothing left." | `--no-follow` is the *only* thing that makes stern conclude "all logs shown". Idle means it waits, not exits. |
+| "I'll pipe to `head`, so it ends." | It does end, but `head` keeps the *oldest* N lines it happened to see first — the opposite of the recent lines you wanted. `--tail N` selects from the end. |
+| "The previous stern call worked without it." | It did not "work" — it hit the timeout, and you saw the partial output that survived. |
+| "This is a follow-up to a live session, `--tail 0` is what they meant." | `--tail 0` means "only lines from now on", which by definition never terminates. It is also rejected together with `--no-follow`. |
+
+The load-bearing test is not "is streaming reasonable here?" but **"who reads the output?"** If the
+answer is you, in this tool call, then `--no-follow`.
 
 ## The default command shape
 
@@ -110,11 +127,8 @@ stern deploy/api --no-follow --tail 100 -o json      # one JSON object per line,
 stern deploy/api --no-follow --tail 100 -o raw | jq  # just .Message — for apps that log JSON
 ```
 
-`-o json` fields: `message`, `timestamp` (only with `--timestamps`), `nodeName`, `namespace`,
-`podName`, `containerName`, `labels`, `annotations`.
-
-To reshape JSON application logs into something readable, use `--template` — see
-[references/templates.md](references/templates.md).
+For the `-o json` field names, the other predefined outputs, and `--template` for reshaping JSON
+application logs into something readable, see [references/templates.md](references/templates.md).
 
 ## Preflight
 

@@ -25,9 +25,10 @@ A crash-looping container is `terminated` or `waiting`, so a plain tail may show
 stern deploy/api -n prod --no-follow --tail 50 --container-state terminated --color never
 ```
 
-`--container-state` accepts `running`, `waiting`, `terminated`, `all` (comma-separated or repeated).
-Default is `all`, so usually you are *restricting* rather than enabling — the reason a plain run
-looks empty is more often `--since`/`--tail` than the state filter.
+The default is already `all`, so this flag *restricts* rather than enables — meaning an empty result
+from a plain run is more often caused by `--since`/`--tail` than by the container state. Reach for
+`--container-state terminated` when you want the dead container's output isolated from the noise of
+the one that just restarted.
 
 ### Init container refuses to finish
 
@@ -43,9 +44,8 @@ Init containers are included by default (`--init-containers=true`); `-c <name>` 
 stern . -n prod --condition=ready=false --no-follow --tail 20 --color never
 ```
 
-Valid conditions: `Ready`, `ContainersReady`, `Initialized`, `PodScheduled`, `DisruptionTarget`,
-`PodReadyToStartContainers` (case-insensitive, `=false` to invert). Only usable together with
-`--tail=0` or `--no-follow`.
+Append `=false` to invert any pod condition; names are case-insensitive and listed in the flag
+reference. The pods this finds are the ones whose logs explain a stuck rollout.
 
 ## Searching
 
