@@ -69,6 +69,10 @@ stern <query> -n <namespace> --no-follow --tail 50 --since 1h --color never --on
 Keep the status lines (i.e. omit `--only-log-lines`) when you need to know *which pods were even
 found* — that is often the actual answer.
 
+If the task already has a familiar shape — a crash loop, hunting one error across a namespace,
+getting output in chronological order, replaying a local log file — take the worked command from
+[references/recipes.md](references/recipes.md) instead of composing flags from scratch.
+
 ## Selecting what to read
 
 The positional argument is a **regex on pod names**, unless it has the form `<resource>/<name>`,
@@ -98,6 +102,10 @@ Narrow further with:
 | several namespaces | `-n a,b` (repeatable) / `-A` for all |
 | only crashed containers | `--container-state terminated` |
 | skip init/ephemeral containers | `--init-containers=false`, `--ephemeral-containers=false` |
+
+That table is the working subset. When you need a flag that is not in it, an exact default, or the
+config file that may silently be changing those defaults, read
+[references/flags.md](references/flags.md) — guessing a flag name costs a failed invocation.
 
 `--include` / `-i` and `--exclude` / `-e` filter **log lines** (regex, repeatable) — prefer them over
 piping to `grep`, because they apply before the lines are formatted:
@@ -153,10 +161,6 @@ application logs into something readable, see [references/templates.md](referenc
 | `--timestamps` prints nothing | value form matters: `-t`, or `--timestamps=short` with the `=` |
 | running inside a Pod: forbidden | needs RBAC `get,watch,list` on `pods` and `pods/log` |
 
-## Deeper references
-
-- [references/recipes.md](references/recipes.md) — task-oriented cookbook (crash loops, rollouts,
-  error hunting across namespaces, local file replay, running in a container/Pod).
-- [references/flags.md](references/flags.md) — complete flag table, config file, shell completion.
-- [references/templates.md](references/templates.md) — `--template` struct, all template functions,
-  JSON-log formatting examples.
+Each reference is linked above from the point where it becomes the right thing to read:
+[recipes.md](references/recipes.md) for worked commands, [flags.md](references/flags.md) for the
+complete flag set and config file, [templates.md](references/templates.md) for output formatting.

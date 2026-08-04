@@ -57,7 +57,7 @@ Resources accepted in `<resource>/<name>`: `pod`/`po`, `replicationcontroller`/`
 | flag | default | purpose |
 |---|---|---|
 | `--output`, `-o` | `default` | `default`, `raw`, `json`, `extjson`, `ppextjson` |
-| `--template` | — | Go template for each line (see `templates.md`) |
+| `--template` | — | Go template rendered once per log line |
 | `--template-file`, `-T` | — | template from a file; overrides `--template` |
 | `--only-log-lines` | `false` | suppress the `+ pod` / `- pod` status lines |
 | `--timestamps`, `-t` | — | `default` or `short`; the `=` cannot be omitted when giving a value (`--timestamps=short`) |

@@ -44,8 +44,8 @@ Init containers are included by default (`--init-containers=true`); `-c <name>` 
 stern . -n prod --condition=ready=false --no-follow --tail 20 --color never
 ```
 
-Append `=false` to invert any pod condition; names are case-insensitive and listed in the flag
-reference. The pods this finds are the ones whose logs explain a stuck rollout.
+Append `=false` to invert any pod condition; names are case-insensitive. The pods this finds are the
+ones whose logs explain a stuck rollout.
 
 ## Searching
 
