@@ -163,8 +163,10 @@ Three things in that snippet, each preventing a different wrong answer:
   services mix formats — framework and stdlib lines are plain text alongside the JSON logger. `jq`
   aborts on the first one, prints nothing and exits 5, which `pipefail` turns into a failed pipeline
   for perfectly healthy logs. `-o json` needs no guard: that envelope is always valid JSON. Keep the
-  `\s*` — a bare `^\{` drops an indented record silently at exit 0, and when you cannot characterise
-  the stream, `jq -R 'fromjson? | …'` errs toward keeping lines instead of dropping them.
+  `\s*` — a bare `^\{` drops an indented record silently at exit 0. Guarding on the `jq` side instead
+  takes **two** filters, `jq -R 'fromjson? | objects | …'`: `?` guards only `fromjson`, so without
+  `objects` a top-level array or scalar parses, reaches the field filter and raises a per-record
+  error that `pipefail` cannot see — `jq` reports only the last input's status.
 
 For the `-o json` field names, the other predefined outputs, and `--template` for reshaping JSON
 application logs into something readable, see [references/templates.md](references/templates.md).

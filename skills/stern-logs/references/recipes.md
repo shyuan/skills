@@ -144,7 +144,7 @@ failure into a clean-looking empty result, the fourth turns healthy data into a 
 | `2>&1 \| jq` | the `+ pod › container` attach lines are on **stderr**; merging them in feeds `jq` a non-JSON line, `jq` aborts, the pipeline yields nothing | never merge stderr into a JSON pipe |
 | `2>/dev/null \| jq` | quiet, but it also discards stern's real errors — RBAC `forbidden`, a bad `--context`, a template that failed to expand | `--only-log-lines` |
 | ignoring the exit status | `jq` succeeds on empty input, so `$?` reports the *last* command; a failed stern run reads as success | `set -o pipefail` (portable), or check the first command's status — `${PIPESTATUS[0]}` in bash, `${pipestatus[1]}` in zsh |
-| `-o raw \| jq` on a **mixed** stream | framework lines are plain text; `jq` aborts on the first one and yields nothing — exit 5, which `pipefail` propagates as pipeline failure even though the logs were fine | `-i '^\s*\{'` to drop them at the source, or `jq -R 'fromjson? \| …'` |
+| `-o raw \| jq` on a **mixed** stream | framework lines are plain text; `jq` aborts on the first one and yields nothing — exit 5, which `pipefail` propagates as pipeline failure even though the logs were fine | `-i '^\s*\{'` to drop them at the source, or `jq -R 'fromjson? \| objects \| …'` — `objects` is not optional, see below |
 
 `--only-log-lines` is the right tool because it suppresses the status lines **at the source** — they
 are printed under `if !OnlyLogLines` — while errors go to stderr through a different path that the
@@ -203,21 +203,55 @@ as a failed pipeline even though the logs were healthy.
 
 Guarding at the stern end is preferred for the same reason `--include` beats piping to `grep`: it
 applies before the line is formatted. Where the stern side cannot be changed, guard on the `jq` side
-instead — `jq -R 'fromjson? | select(.level=="error") | .msg' -r` skips unparseable lines and exits
-0.
+instead:
 
-**The two are not equivalent, and the difference can hide an error.** A pattern guard decides by
-*shape*; `fromjson?` decides by whether the line actually parses. `^\s*\{` therefore tolerates
-leading whitespace (`^\{` alone would not — it silently drops an indented record, at exit 0, with no
-sign anything was lost), but both pattern forms still assume:
+```bash
+jq -R 'fromjson? | objects | select(.level=="error") | .msg' -r
+```
 
-| assumption | what breaks it | consequence |
+**Both filters are load-bearing.** `fromjson?` drops lines that are not JSON at all; `objects` drops
+JSON values that are not objects. The `?` guards only `fromjson`, so without `objects` a top-level
+array or scalar parses successfully, reaches the field filter, and raises a per-record error:
+
+```console
+$ printf '{"level":"error","msg":"flat"}\n["top","level"]\n42\n' \
+  | jq -R 'fromjson? | select(.level=="error") | .msg' -r
+jq: error (at <stdin>:2): Cannot index array with string ("level")
+```
+
+And that error need not reach the exit code, because `jq` reports the status of the **last** input
+it processed. The same records in a different order give different statuses:
+
+```console
+$ printf '{"msg":"a"}\n["arr"]\n{"msg":"b"}\n' | jq -R 'fromjson? | .msg' -r >/dev/null 2>&1; echo $?
+0        # error in the middle, later record succeeded
+$ printf '{"msg":"a"}\n{"msg":"b"}\n["arr"]\n' | jq -R 'fromjson? | .msg' -r >/dev/null 2>&1; echo $?
+5        # same data, error last
+```
+
+So `pipefail` does not cover this: a record can fail, the message go to stderr, and the pipeline
+still exit 0 — and the habit of adding `2>/dev/null` to a `jq` pipe hides the message too.
+
+### Choosing between the two guards
+
+With `objects` in place both forms drop a non-object line; they differ in *how* they decide.
+
+| | decides by | misses |
 |---|---|---|
-| one JSON value per line | a pretty-printed multi-line object | the guard keeps only the `{` line; `fromjson?` fails on it too — reconfigure the logger to single-line JSON |
-| the value is an object | a top-level array or scalar log line | dropped by the guard, kept by `fromjson?` |
+| `-i '^\s*\{'` | shape | anything whose appearance and parseability disagree — a line that looks like JSON but is truncated, or valid JSON that does not start with `{` |
+| `fromjson? \| objects` | what actually parses | nothing about parseability, but it runs after stern has already formatted the line |
 
-When you cannot characterise the stream, `fromjson?` is the safer of the two: it errs toward keeping
-lines, and a guard that errs toward dropping them is how an error goes missing quietly.
+Prefer `fromjson? | objects` when you cannot characterise the stream. Both still assume **one JSON
+value per line** — a pretty-printed multi-line object defeats both, and `fromjson?` fails on it
+silently at exit 0, so reconfigure the logger to single-line JSON rather than working around it.
+
+Neither guard reports what it dropped. Where silent loss is unacceptable, count instead of trusting
+the exit status:
+
+```bash
+# stderr gets the line count going in, stdout the count coming out; a gap is what was dropped
+stern … --only-log-lines | tee >(wc -l >&2) | jq -R 'fromjson? | objects | …' -r | wc -l
+```
 
 Do not add `-t` to any of these: it prefixes the timestamp into the message, so `-o raw | jq` stops
 being valid JSON and `-o json`'s `.message` gains a timestamp prefix.
