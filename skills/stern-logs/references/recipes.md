@@ -142,11 +142,37 @@ Three ways to get an empty result that looks like a clean one. All three are avo
 |---|---|---|
 | `2>&1 \| jq` | the `+ pod › container` attach lines are on **stderr**; merging them in feeds `jq` a non-JSON line, `jq` aborts, the pipeline yields nothing | never merge stderr into a JSON pipe |
 | `2>/dev/null \| jq` | quiet, but it also discards stern's real errors — RBAC `forbidden`, a bad `--context`, a template that failed to expand | `--only-log-lines` |
-| ignoring the exit status | `jq` succeeds on empty input, so `$?` reports the *last* command; a failed stern run reads as success | `set -o pipefail`, or check `${PIPESTATUS[0]}` |
+| ignoring the exit status | `jq` succeeds on empty input, so `$?` reports the *last* command; a failed stern run reads as success | `set -o pipefail` (portable), or check the first command's status — `${PIPESTATUS[0]}` in bash, `${pipestatus[1]}` in zsh |
 
 `--only-log-lines` is the right tool because it suppresses the status lines **at the source** — they
 are printed under `if !OnlyLogLines` — while errors go to stderr through a different path that the
 flag does not gate. Status noise gone, diagnostics intact.
+
+### Checking the pipeline status portably
+
+`set -o pipefail` works in both bash and zsh, so reach for it first. The array fallback does not
+port, and gets this wrong *silently*:
+
+```bash
+# bash
+false | true; echo "${PIPESTATUS[0]}"          # 1
+
+# zsh — lowercase name, and 1-indexed
+false | true; echo "${pipestatus[1]}"          # 1
+false | true; echo "[${PIPESTATUS[0]}]"        # []  — no such variable
+```
+
+An empty expansion reads as "did not fail", which is the failure this table is about. macOS has
+defaulted to zsh since Catalina, and agents typically shell out to the user's login shell.
+
+Both shells also reset the array after **every** command, including a debugging `echo`. Capture it
+as the very next statement or not at all:
+
+```bash
+stern … | jq …
+st=("${pipestatus[@]}")     # zsh; bash: st=("${PIPESTATUS[@]}")
+echo "checking"             # too late if this comes first — the array is now echo's status
+```
 
 ```bash
 set -o pipefail
