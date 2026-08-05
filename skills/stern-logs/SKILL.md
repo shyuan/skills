@@ -154,7 +154,10 @@ Two things make a failed query look like a clean empty one, and both are in that
   that but throws away stern's real errors (RBAC `forbidden`, a bad `--context`) along with the
   noise. `--only-log-lines` stops the status lines being printed at all and leaves errors on stderr.
 - **`set -o pipefail`.** `jq` exits 0 on empty input, so without it the pipeline reports success even
-  when stern failed. Where you cannot set it, check `${PIPESTATUS[0]}` instead of `$?`.
+  when stern failed. It is portable — prefer it. Where you cannot set it, check the *first* command's
+  status rather than `$?`: `${PIPESTATUS[0]}` in bash, `${pipestatus[1]}` in zsh (lowercase, and
+  1-indexed). Using the bash spelling under zsh expands to an empty string, which reads as "did not
+  fail" — the exact failure this bullet exists to prevent, on the shell macOS defaults to.
 
 For the `-o json` field names, the other predefined outputs, and `--template` for reshaping JSON
 application logs into something readable, see [references/templates.md](references/templates.md).
