@@ -60,7 +60,7 @@ Resources accepted in `<resource>/<name>`: `pod`/`po`, `replicationcontroller`/`
 | `--template` | — | Go template rendered once per log line |
 | `--template-file`, `-T` | — | template from a file; overrides `--template` |
 | `--only-log-lines` | `false` | suppress the `+ pod` / `- pod` status lines |
-| `--timestamps`, `-t` | — | `default` or `short`; the `=` cannot be omitted when giving a value (`--timestamps=short`) |
+| `--timestamps`, `-t` | — | `default` or `short`. The `=` cannot be omitted: `--timestamps short` silently ignores the value and uses the full format. The timestamp is prefixed into the message, not exposed as a separate field |
 | `--timezone` | `Local` | e.g. `UTC`, `Asia/Taipei` |
 | `--color` | `auto` | `auto` (tty only), `always`, `never` |
 | `--diff-container`, `-d` | `false` | distinct colors per container |

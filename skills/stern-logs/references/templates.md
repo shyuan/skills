@@ -8,13 +8,14 @@ need a specific line shape for downstream tooling.
 | output | shape |
 |---|---|
 | `default` | `[namespace] pod container [timestamp] message`, colorized per `--color`; the namespace column appears only with `-A` or multiple `-n` |
-| `raw` | the message alone (plus timestamp if `-t`) — the one to pipe into `jq` |
+| `raw` | the message alone — the one to pipe into `jq`, but only without `-t`, which prefixes a timestamp and stops the line being valid JSON |
 | `json` | stern's envelope marshalled as JSON, one object per line |
 | `extjson` | `{"pod": …, "container": …, "message": …}` with colorized names |
 | `ppextjson` | the same, pretty-printed |
 
-`-o json` field names: `message`, `timestamp` (omitted unless `--timestamps`), `nodeName`,
-`namespace`, `podName`, `containerName`, `labels`, `annotations`.
+`-o json` field names: `message`, `nodeName`, `namespace`, `podName`, `containerName`, `labels`,
+`annotations`. **There is no `timestamp` key** — not even with `--timestamps`, which instead prefixes
+the timestamp into `message`.
 
 ## The template struct
 
@@ -22,8 +23,7 @@ need a specific line shape for downstream tooling.
 
 | property | type | notes |
 |---|---|---|
-| `.Message` | string | the log line; stays **raw** even with `--timestamps`, so `parseJSON` keeps working |
-| `.Timestamp` | string | formatted per `--timestamps`/`--timezone`; empty unless `--timestamps` is set |
+| `.Message` | string | the log line — **with `--timestamps` the formatted timestamp is prefixed into it**, which breaks `parseJSON` (see below) |
 | `.NodeName` | string | |
 | `.Namespace` | string | |
 | `.PodName` | string | |
@@ -33,6 +33,19 @@ need a specific line shape for downstream tooling.
 | `.PodColor` / `.ContainerColor` | `*color.Color` | pass to the `color` function |
 
 Templates do not emit a newline on their own — end with `{{"\n"}}`.
+
+There is **no timestamp property**. `--timestamps` works by prefixing the formatted time into
+`.Message`:
+
+```console
+$ stern <pod> -n <ns> --no-follow --tail 1 -t --only-log-lines --template='[{{.PodName}}] {{.Message}}{{"\n"}}'
+[my-pod-abc123] 2026-08-04T17:32:02.441931913+08:00 {"level":"error","msg":"..."}
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ inside .Message
+```
+
+So `-t` and JSON parsing are mutually exclusive: every `parseJSON` template below falls through to
+its `else` branch once `-t` is on. Referencing `.Timestamp` is a hard error —
+`can't evaluate field Timestamp in type stern.Log`.
 
 ## Template functions
 
@@ -44,7 +57,7 @@ On top of Go's builtins:
 | `color` | `color.Color, string` | wrap text in one of the provided colors |
 | `parseJSON` | string | parse as JSON; **errors** on failure |
 | `tryParseJSON` | string | parse as JSON; returns nil on failure (use with `with`/`else`) |
-| `extractJSONParts` | string, ...keys | parse and concatenate the given keys; dot notation reaches nested fields (`python.levelname`) |
+| `extractJSONParts` | string, ...keys | parse and concatenate the given **top-level** keys; a dotted key is looked up literally, so nested access silently yields `<nil>` |
 | `tryExtractJSONParts` | string, ...keys | same, but returns the original text on failure |
 | `prettyJSON` | any | pretty-print; passes the input through unchanged if it is not JSON |
 | `toRFC3339Nano` | object | parse a timestamp (string/int/json.Number) → RFC3339Nano |
@@ -90,10 +103,18 @@ Pretty-print whatever is JSON, pass the rest through:
 stern --template='{{ .Message | prettyJSON }}{{"\n"}}' backend --no-follow --tail 50
 ```
 
-Nested fields via dot notation — for `{"python": {"levelname": "INFO", "module": "router"}}`:
+Nested fields — for `{"python": {"levelname": "INFO", "module": "router"}}`. `extractJSONParts` reads
+**top-level keys only**, and a dotted key produces `<nil>` in the output rather than an error, so
+parse first and walk the structure with ordinary Go template field access:
 
 ```bash
-stern --template='{{ levelColor (extractJSONParts .Message "python.levelname") }} {{ extractJSONParts .Message "python.module" }}{{"\n"}}' backend --no-follow --tail 50
+stern --template='{{with $m := .Message | tryParseJSON}}{{levelColor $m.python.levelname}} {{$m.python.module}}{{else}}{{.Message}}{{end}}{{"\n"}}' backend --no-follow --tail 50
+```
+
+`extractJSONParts` stays the shorter option when the keys are flat:
+
+```bash
+stern --template='{{ levelColor (extractJSONParts .Message "level") }} {{"\n"}}' backend --no-follow --tail 50
 ```
 
 From a file, when the template gets long:
