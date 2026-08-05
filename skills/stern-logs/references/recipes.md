@@ -131,22 +131,31 @@ as a blocking foreground call.
 
 ## Piping into other tools
 
-**Never `2>&1` into `jq`.** The `+ pod › container` attach lines go to **stderr**, so stdout is
-already clean JSON; redirecting stderr into the pipe feeds `jq` a non-JSON line, `jq` aborts, and the
-pipeline returns *nothing* — indistinguishable from a genuine "no matches" result. Use
-`2>/dev/null` when you want the status lines gone from the terminal too.
+Three ways to get an empty result that looks like a clean one. All three are avoidable:
+
+| mistake | what happens | instead |
+|---|---|---|
+| `2>&1 \| jq` | the `+ pod › container` attach lines are on **stderr**; merging them in feeds `jq` a non-JSON line, `jq` aborts, the pipeline yields nothing | never merge stderr into a JSON pipe |
+| `2>/dev/null \| jq` | quiet, but it also discards stern's real errors — RBAC `forbidden`, a bad `--context`, a template that failed to expand | `--only-log-lines` |
+| ignoring the exit status | `jq` succeeds on empty input, so `$?` reports the *last* command; a failed stern run reads as success | `set -o pipefail`, or check `${PIPESTATUS[0]}` |
+
+`--only-log-lines` is the right tool because it suppresses the status lines **at the source** — they
+are printed under `if !OnlyLogLines` — while errors go to stderr through a different path that the
+flag does not gate. Status noise gone, diagnostics intact.
 
 ```bash
+set -o pipefail
+
 # app logs are JSON: strip stern's prefix, hand to jq
-stern deploy/api -n prod --no-follow --tail 200 -o raw 2>/dev/null \
+stern deploy/api -n prod --no-follow --tail 200 -o raw --only-log-lines \
   | jq -r 'select(.level=="error") | .msg'
 
 # stern's own envelope as JSON (keeps pod/container/namespace)
-stern deploy/api -n prod --no-follow --tail 200 -o json 2>/dev/null \
+stern deploy/api -n prod --no-follow --tail 200 -o json --only-log-lines \
   | jq -r '[.podName, .message] | @tsv'
 
 # count errors per pod
-stern deploy/api -n prod --no-follow --since 1h -o json -i ERROR 2>/dev/null \
+stern deploy/api -n prod --no-follow --since 1h -o json -i ERROR --only-log-lines \
   | jq -r .podName | sort | uniq -c | sort -rn
 ```
 

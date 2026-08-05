@@ -137,13 +137,16 @@ stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
 ## Machine-readable output
 
 ```bash
-stern deploy/api --no-follow --tail 100 -o json 2>/dev/null      # stern's envelope, one object per line
-stern deploy/api --no-follow --tail 100 -o raw 2>/dev/null | jq  # just the message — for apps logging JSON
+stern deploy/api --no-follow --tail 100 -o json --only-log-lines      # envelope, one object per line
+stern deploy/api --no-follow --tail 100 -o raw --only-log-lines | jq  # message only — apps logging JSON
 ```
 
-**Never `2>&1` into `jq`.** The `+ pod › container` attach lines go to stderr, so stdout is already
-clean JSON. Merging stderr in feeds `jq` a non-JSON line, `jq` aborts, and the pipeline returns
-nothing — which looks exactly like a clean "no errors found" result.
+**Suppress the status lines with `--only-log-lines`, not with a redirect.** The `+ pod › container`
+attach lines go to stderr, so `2>&1 | jq` feeds `jq` a non-JSON line and the pipeline aborts to
+nothing; `2>/dev/null` avoids that but throws away stern's real errors (RBAC `forbidden`, a bad
+`--context`) along with the noise. `--only-log-lines` stops the status lines being printed at all and
+leaves errors on stderr. Add `set -o pipefail` too — `jq` exits 0 on empty input and will otherwise
+mask a failed stern run.
 
 For the `-o json` field names, the other predefined outputs, and `--template` for reshaping JSON
 application logs into something readable, see [references/templates.md](references/templates.md).
@@ -170,7 +173,7 @@ application logs into something readable, see [references/templates.md](referenc
 | ANSI garbage in captured output | `--color never` |
 | `--timestamps short` gives the long format | the `=` cannot be omitted. `--timestamps short` silently ignores the value and falls back to the full format — no error. Write `--timestamps=short`, or bare `-t` |
 | `parseJSON` template suddenly hits its `else` branch | `-t` is on: it prefixes the timestamp into `.Message`. Drop `-t` when parsing JSON |
-| empty result from `stern … \| jq` | `2>&1` merged the stderr status lines into the pipe and `jq` aborted. Use `2>/dev/null` |
+| empty result from `stern … \| jq` | either `2>&1` merged the stderr status lines into the pipe and `jq` aborted, or stern itself failed and `jq` returned 0 anyway. Use `--only-log-lines` and `set -o pipefail` — never `2>/dev/null`, which hides the error that explains it |
 | running inside a Pod: forbidden | needs RBAC `get,watch,list` on `pods` and `pods/log` |
 
 Each reference is linked above from the point where it becomes the right thing to read:
