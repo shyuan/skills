@@ -40,9 +40,9 @@ Resources accepted in `<resource>/<name>`: `pod`/`po`, `replicationcontroller`/`
 | `--no-follow` | `false` | exit once all logs have been shown — **required for non-interactive use** |
 | `--tail` | `-1` | lines from the end, per container; `-1` = all. `--tail=0` = only new lines, and is incompatible with `--no-follow` |
 | `--since`, `-s` | `48h0m0s` | relative duration (`5s`, `2m`, `3h`) |
-| `--max-log-requests` | `-1` | concurrent log requests. Resolves to **5 with `--no-follow`** (throttle) or **50 without** (error on exceed) |
-| `--qps` | `0` | API QPS; `-1` disables client-side throttling |
-| `--burst` | `0` | API burst; ignored when `--qps=-1` |
+| `--max-log-requests` | `-1` | concurrent log requests, counted per **container**. Resolves to **5 with `--no-follow`** (throttle) or **50 without** (error on exceed). Does **not** affect rate limiting — for speed see `--qps` |
+| `--qps` | `0` | API QPS. `0` means client-go's default of **5** (burst 10), which is what makes a wide query take ~30s; `-1` disables client-side throttling |
+| `--burst` | `0` | API burst; `0` means client-go's default of **10**. Ignored when `--qps=-1` |
 
 ## Line filtering
 
@@ -85,11 +85,23 @@ Defaults for any flag, at `~/.config/stern/config.yaml`:
 ```yaml
 # <flag name>: <value>
 tail: 10
-max-log-requests: 999
 timestamps: short
+qps: 50               # bounded, not -1 — this applies to every stern you ever run
+burst: 100
+max-log-requests: 50
 pod-colors: "32,33,34,35,36,37"
 container-colors: "32;4,33;4,34;4,35;4,36;4,37;4"
 ```
+
+**Tune throttling per command, not in the config file.** `--qps=-1` is reasonable on the one wide
+query you are running right now and watching; the same value here applies to every invocation
+forever, including ones you fire without thinking on a cluster you share. Bounded values give most
+of the speed-up and cannot make stern the noisy neighbour.
+
+The same asymmetry applies to concurrency. Upstream's example uses `max-log-requests: 999`, which
+reads like a performance setting and is not one on its own — it raises the ceiling while every
+request still queues behind the rate limiter, so without a `qps` change it buys nothing, and with
+one it buys hundreds of simultaneously open connections you did not ask for.
 
 A config file on the machine changes what a bare `stern` command does — when output looks unexpected
 (e.g. timestamps you did not ask for), check it. Pass explicit flags in scripts rather than relying
