@@ -143,9 +143,9 @@ stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
 stern deploy/api --no-follow --tail 100 -o json --only-log-lines
 
 # piped: pipefail belongs in the command, not in a footnote.
-# -i '^\{' keeps plain-text framework lines away from jq
+# -i '^\s*\{' keeps plain-text framework lines away from jq
 set -o pipefail
-stern deploy/api --no-follow --tail 100 -o raw --only-log-lines -i '^\{' | jq
+stern deploy/api --no-follow --tail 100 -o raw --only-log-lines -i '^\s*\{' | jq
 ```
 
 Three things in that snippet, each preventing a different wrong answer:
@@ -159,10 +159,12 @@ Three things in that snippet, each preventing a different wrong answer:
   status rather than `$?`: `${PIPESTATUS[0]}` in bash, `${pipestatus[1]}` in zsh (lowercase, and
   1-indexed). Using the bash spelling under zsh expands to an empty string, which reads as "did not
   fail" — the exact failure this bullet exists to prevent, on the shell macOS defaults to.
-- **`-i '^\{'` with `-o raw`.** `-o raw` passes the application's own line through, and real services
-  mix formats — framework and stdlib lines are plain text alongside the JSON logger. `jq` aborts on
-  the first one, prints nothing and exits 5, which `pipefail` turns into a failed pipeline for
-  perfectly healthy logs. `-o json` needs no guard: that envelope is always valid JSON.
+- **`-i '^\s*\{'` with `-o raw`.** `-o raw` passes the application's own line through, and real
+  services mix formats — framework and stdlib lines are plain text alongside the JSON logger. `jq`
+  aborts on the first one, prints nothing and exits 5, which `pipefail` turns into a failed pipeline
+  for perfectly healthy logs. `-o json` needs no guard: that envelope is always valid JSON. Keep the
+  `\s*` — a bare `^\{` drops an indented record silently at exit 0, and when you cannot characterise
+  the stream, `jq -R 'fromjson? | …'` errs toward keeping lines instead of dropping them.
 
 For the `-o json` field names, the other predefined outputs, and `--template` for reshaping JSON
 application logs into something readable, see [references/templates.md](references/templates.md).
