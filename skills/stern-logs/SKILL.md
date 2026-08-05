@@ -118,12 +118,16 @@ stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
 
 - **Empty output is not an error.** A query matching no pods exits 0 and prints nothing. Verify with
   `kubectl get pods -n <ns>` before concluding "there are no errors".
-- **Lines from different pods interleave** in arrival order, not timestamp order. For a time-ordered
-  reading either add `-t` and sort, or serialize the reads:
+- **Lines from different pods interleave** in arrival order, not timestamp order. Piping the default
+  output to `sort` sorts by *pod name*, because that is what the default template leads with. Either
+  serialize the reads, or put the timestamp first with a template:
   ```bash
   stern deploy/api --no-follow --max-log-requests 1 --tail 100   # pod by pod, in order
-  stern . -A --no-follow --since 5m --only-log-lines -t | sort   # timestamp-first, then sort
+  stern . -A --no-follow --since 10m --only-log-lines --color never -t \
+    --template='{{.Message}}  @{{.PodName}}/{{.ContainerName}}{{"\n"}}' | sort
   ```
+  That works because `-t` prefixes the timestamp **into** `.Message` — which is also why `-t` breaks
+  `parseJSON` templates and `-o raw | jq`. There is no separate timestamp field.
 - `--max-log-requests` **never silently drops pods.** With `--no-follow` (default 5) it is a
   concurrency limit: every matching container is still read, just fewer at a time, so the output is
   complete and only slower. Without `--no-follow` (default 50) exceeding it is a hard error that
@@ -133,9 +137,13 @@ stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
 ## Machine-readable output
 
 ```bash
-stern deploy/api --no-follow --tail 100 -o json      # one JSON object per line, stern's envelope
-stern deploy/api --no-follow --tail 100 -o raw | jq  # just .Message — for apps that log JSON
+stern deploy/api --no-follow --tail 100 -o json 2>/dev/null      # stern's envelope, one object per line
+stern deploy/api --no-follow --tail 100 -o raw 2>/dev/null | jq  # just the message — for apps logging JSON
 ```
+
+**Never `2>&1` into `jq`.** The `+ pod › container` attach lines go to stderr, so stdout is already
+clean JSON. Merging stderr in feeds `jq` a non-JSON line, `jq` aborts, and the pipeline returns
+nothing — which looks exactly like a clean "no errors found" result.
 
 For the `-o json` field names, the other predefined outputs, and `--template` for reshaping JSON
 application logs into something readable, see [references/templates.md](references/templates.md).
@@ -160,7 +168,9 @@ application logs into something readable, see [references/templates.md](referenc
 | no logs from a crash-looping pod | not a state-filter problem: the default `--container-state all` already covers it, and stern falls back to the last terminated instance's logs. Check `--since`/`--tail` first. `--container-state terminated` would *exclude* it — CrashLoopBackOff is `waiting` |
 | a container is skipped entirely | it has no container ID yet (never started — image pull failure, etc.); its logs do not exist, use `kubectl describe pod` |
 | ANSI garbage in captured output | `--color never` |
-| `--timestamps` prints nothing | value form matters: `-t`, or `--timestamps=short` with the `=` |
+| `--timestamps short` gives the long format | the `=` cannot be omitted. `--timestamps short` silently ignores the value and falls back to the full format — no error. Write `--timestamps=short`, or bare `-t` |
+| `parseJSON` template suddenly hits its `else` branch | `-t` is on: it prefixes the timestamp into `.Message`. Drop `-t` when parsing JSON |
+| empty result from `stern … \| jq` | `2>&1` merged the stderr status lines into the pipe and `jq` aborted. Use `2>/dev/null` |
 | running inside a Pod: forbidden | needs RBAC `get,watch,list` on `pods` and `pods/log` |
 
 Each reference is linked above from the point where it becomes the right thing to read:

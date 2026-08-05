@@ -102,15 +102,22 @@ stern deploy/api -n prod --no-follow --tail 100 -t
 # compact timestamps, fixed timezone
 stern deploy/api -n prod --no-follow --tail 100 --timestamps=short --timezone UTC
 
-# strictly chronological across pods
-stern . -n prod --no-follow --since 5m --only-log-lines -t --color never | sort
+# strictly chronological across pods — needs a template, see below
+stern . -n prod --no-follow --since 10m --only-log-lines --color never -t \
+  --template='{{.Message}}  @{{.PodName}}/{{.ContainerName}}{{"\n"}}' | sort
 
 # strictly pod-by-pod (no interleaving)
 stern deploy/api -n prod --no-follow --tail 100 --max-log-requests 1 --color never
 ```
 
-`--timestamps` keeps `.Message` raw and exposes the formatted time separately as `.Timestamp`, so a
-`parseJSON` template still works with `-t` on.
+**Piping the default output to `sort` does not sort by time.** The default template leads with the
+pod name (`[namespace] pod container timestamp message`), so `sort` orders by pod. The template above
+works because `-t` prefixes the timestamp *into* `.Message`, making a `.Message`-first line genuinely
+timestamp-first.
+
+That prefixing is also why `-t` and JSON parsing do not mix: with `-t` on, `.Message` is
+`2026-08-04T17:32:02.441931913+08:00 {"level":"error",…}`, and `parseJSON` / `tryParseJSON` fail on
+it. Choose one — timestamps for ordering, or JSON parsing for structure.
 
 ## Watching (interactive only — needs a human or a background task)
 
@@ -124,18 +131,27 @@ as a blocking foreground call.
 
 ## Piping into other tools
 
+**Never `2>&1` into `jq`.** The `+ pod › container` attach lines go to **stderr**, so stdout is
+already clean JSON; redirecting stderr into the pipe feeds `jq` a non-JSON line, `jq` aborts, and the
+pipeline returns *nothing* — indistinguishable from a genuine "no matches" result. Use
+`2>/dev/null` when you want the status lines gone from the terminal too.
+
 ```bash
 # app logs are JSON: strip stern's prefix, hand to jq
-stern deploy/api -n prod --no-follow --tail 200 -o raw | jq -r 'select(.level=="error") | .msg'
+stern deploy/api -n prod --no-follow --tail 200 -o raw 2>/dev/null \
+  | jq -r 'select(.level=="error") | .msg'
 
 # stern's own envelope as JSON (keeps pod/container/namespace)
-stern deploy/api -n prod --no-follow --tail 200 -o json \
+stern deploy/api -n prod --no-follow --tail 200 -o json 2>/dev/null \
   | jq -r '[.podName, .message] | @tsv'
 
 # count errors per pod
-stern deploy/api -n prod --no-follow --since 1h -o json -i ERROR \
+stern deploy/api -n prod --no-follow --since 1h -o json -i ERROR 2>/dev/null \
   | jq -r .podName | sort | uniq -c | sort -rn
 ```
+
+Do not add `-t` to any of these: it prefixes the timestamp into the message, so `-o raw | jq` stops
+being valid JSON and `-o json`'s `.message` gains a timestamp prefix.
 
 ## Replaying a local log file
 
