@@ -137,16 +137,22 @@ stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
 ## Machine-readable output
 
 ```bash
-stern deploy/api --no-follow --tail 100 -o json --only-log-lines      # envelope, one object per line
-stern deploy/api --no-follow --tail 100 -o raw --only-log-lines | jq  # message only — apps logging JSON
+# no pipe: stern's own exit status is the answer
+stern deploy/api --no-follow --tail 100 -o json --only-log-lines
+
+# piped: pipefail belongs in the command, not in a footnote
+set -o pipefail
+stern deploy/api --no-follow --tail 100 -o raw --only-log-lines | jq
 ```
 
-**Suppress the status lines with `--only-log-lines`, not with a redirect.** The `+ pod › container`
-attach lines go to stderr, so `2>&1 | jq` feeds `jq` a non-JSON line and the pipeline aborts to
-nothing; `2>/dev/null` avoids that but throws away stern's real errors (RBAC `forbidden`, a bad
-`--context`) along with the noise. `--only-log-lines` stops the status lines being printed at all and
-leaves errors on stderr. Add `set -o pipefail` too — `jq` exits 0 on empty input and will otherwise
-mask a failed stern run.
+Two things make a failed query look like a clean empty one, and both are in that snippet:
+
+- **`--only-log-lines`, not a redirect.** The `+ pod › container` attach lines go to stderr, so
+  `2>&1 | jq` feeds `jq` a non-JSON line and the pipeline aborts to nothing; `2>/dev/null` avoids
+  that but throws away stern's real errors (RBAC `forbidden`, a bad `--context`) along with the
+  noise. `--only-log-lines` stops the status lines being printed at all and leaves errors on stderr.
+- **`set -o pipefail`.** `jq` exits 0 on empty input, so without it the pipeline reports success even
+  when stern failed. Where you cannot set it, check `${PIPESTATUS[0]}` instead of `$?`.
 
 For the `-o json` field names, the other predefined outputs, and `--template` for reshaping JSON
 application logs into something readable, see [references/templates.md](references/templates.md).
