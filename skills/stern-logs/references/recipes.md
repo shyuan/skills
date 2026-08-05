@@ -103,6 +103,7 @@ stern deploy/api -n prod --no-follow --tail 100 -t
 stern deploy/api -n prod --no-follow --tail 100 --timestamps=short --timezone UTC
 
 # strictly chronological across pods — needs a template, see below
+set -o pipefail
 stern . -n prod --no-follow --since 10m --only-log-lines --color never -t \
   --template='{{.Message}}  @{{.PodName}}/{{.ContainerName}}{{"\n"}}' | sort
 
@@ -114,6 +115,10 @@ stern deploy/api -n prod --no-follow --tail 100 --max-log-requests 1 --color nev
 pod name (`[namespace] pod container timestamp message`), so `sort` orders by pod. The template above
 works because `-t` prefixes the timestamp *into* `.Message`, making a `.Message`-first line genuinely
 timestamp-first.
+
+`sort` needs `pipefail` for the same reason `jq` does: it exits 0 on empty input, so without it a
+stern failure arrives as a successful empty listing. **Any** command you pipe stern into inherits
+this — the rule is per pipeline, not per tool.
 
 That prefixing is also why `-t` and JSON parsing do not mix: with `-t` on, `.Message` is
 `2026-08-04T17:32:02.441931913+08:00 {"level":"error",…}`, and `parseJSON` / `tryParseJSON` fail on

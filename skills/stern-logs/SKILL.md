@@ -123,6 +123,8 @@ stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
   serialize the reads, or put the timestamp first with a template:
   ```bash
   stern deploy/api --no-follow --max-log-requests 1 --tail 100   # pod by pod, in order
+
+  set -o pipefail                                                # sort exits 0 on empty input too
   stern . -A --no-follow --since 10m --only-log-lines --color never -t \
     --template='{{.Message}}  @{{.PodName}}/{{.ContainerName}}{{"\n"}}' | sort
   ```
@@ -179,7 +181,7 @@ application logs into something readable, see [references/templates.md](referenc
 | ANSI garbage in captured output | `--color never` |
 | `--timestamps short` gives the long format | the `=` cannot be omitted. `--timestamps short` silently ignores the value and falls back to the full format — no error. Write `--timestamps=short`, or bare `-t` |
 | `parseJSON` template suddenly hits its `else` branch | `-t` is on: it prefixes the timestamp into `.Message`. Drop `-t` when parsing JSON |
-| empty result from `stern … \| jq` | either `2>&1` merged the stderr status lines into the pipe and `jq` aborted, or stern itself failed and `jq` returned 0 anyway. Use `--only-log-lines` and `set -o pipefail` — never `2>/dev/null`, which hides the error that explains it |
+| empty result from `stern … \| anything` | either `2>&1` merged the stderr status lines into the pipe and the consumer aborted, or stern failed and the consumer returned 0 anyway — `jq`, `sort`, `grep -c`, `wc` all exit 0 on empty input. Use `--only-log-lines` and `set -o pipefail` on every stern pipeline; never `2>/dev/null`, which hides the error that explains it |
 | running inside a Pod: forbidden | needs RBAC `get,watch,list` on `pods` and `pods/log` |
 
 Each reference is linked above from the point where it becomes the right thing to read:
