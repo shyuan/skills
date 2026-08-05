@@ -101,7 +101,12 @@ Narrow further with:
 | by node | `--node node-1` |
 | several namespaces | `-n a,b` (repeatable) / `-A` for all |
 | only containers that have already exited (finished Jobs) | `--container-state terminated` |
-| skip init/ephemeral containers | `--init-containers=false`, `--ephemeral-containers=false` |
+| skip init/ephemeral containers | `--init-containers=false`, `--ephemeral-containers=false` — on a mesh-injected pod this also drops the sidecar, see below |
+
+Since Kubernetes 1.28 a **native sidecar is an init container** with `restartPolicy: Always`, so
+`--init-containers=false` on a mesh-injected pod removes the proxy too. That is usually what you
+want — but the proxy's access logs carry `x-request-id`, which is what makes following one request
+across services possible. Drop `istio-init` alone with `-E istio-init` when you need to keep it.
 
 That table is the working subset. When you need a flag that is not in it, an exact default, or the
 config file that may silently be changing those defaults, read
@@ -133,8 +138,9 @@ stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
 - `--max-log-requests` **never silently drops pods.** With `--no-follow` (default 5) it is a
   concurrency limit: every matching container is still read, just fewer at a time, so the output is
   complete and only slower. Without `--no-follow` (default 50) exceeding it is a hard error that
-  stops stern with a message naming the flag. Raise it to go faster or to watch more pods — never
-  because you suspect missing output.
+  stops stern with a message naming the flag. The limit counts **containers, not pods** — one
+  3-container pod trips `--max-log-requests 1`. Raise it to watch more pods, never because you
+  suspect missing output, and **not to go faster**: wall clock is set by `--qps`, not by this flag.
 
 ## Machine-readable output
 
@@ -190,6 +196,7 @@ application logs into something readable, see [references/templates.md](referenc
 | flood of output | `--since 48h` + `--tail -1` defaults across many pods |
 | no logs from a crash-looping pod | not a state-filter problem: the default `--container-state all` already covers it, and stern falls back to the last terminated instance's logs. Check `--since`/`--tail` first. `--container-state terminated` would *exclude* it — CrashLoopBackOff is `waiting` |
 | a container is skipped entirely | it has no container ID yet (never started — image pull failure, etc.); its logs do not exist, use `kubectl describe pod` |
+| a wide query takes ~30s with no error, or logs `"client-side throttling"` | client-go's default rate limiter (QPS 5, burst 10), not stern or the cluster. `--max-log-requests` does **not** affect it — add `--qps=-1`, or `--qps 50 --burst 100` on a shared cluster. At default concurrency the wait is silent, so assume throttling before blaming the API server |
 | ANSI garbage in captured output | `--color never` |
 | `--timestamps short` gives the long format | the `=` cannot be omitted. `--timestamps short` silently ignores the value and falls back to the full format — no error. Write `--timestamps=short`, or bare `-t` |
 | `parseJSON` template suddenly hits its `else` branch | `-t` is on: it prefixes the timestamp into `.Message`. Drop `-t` when parsing JSON |

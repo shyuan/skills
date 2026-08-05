@@ -69,7 +69,7 @@ ones whose logs explain a stuck rollout.
 
 ```bash
 stern . -n prod --no-follow --since 1h --tail -1 -i 'connection refused' \
-  --only-log-lines --color never --max-log-requests 20
+  --only-log-lines --color never --qps=-1 --max-log-requests 20
 ```
 
 `--tail -1` (all retained lines) is safe here *because* `--since` and `--include` bound the result —
@@ -78,10 +78,38 @@ never combine an unbounded `--tail` with an unbounded `--since`.
 ### The same, cluster-wide
 
 ```bash
-stern . -A --no-follow --since 15m -i 'panic' --color never --max-log-requests 50
+stern . -A --no-follow --since 15m -i 'panic' --color never --qps=-1 --max-log-requests 50
 ```
 
 `-A` overrides `-n` entirely. The default output template gains a namespace column under `-A`.
+
+### Why both recipes carry `--qps=-1`
+
+**`--qps` decides how long a wide query takes; `--max-log-requests` only decides how many streams
+are open at once.** They are separate mechanisms — `--qps` sets the client-go rate limiter on the
+REST config, `--max-log-requests` is an errgroup limit — and only the first one costs wall clock.
+
+Measured on ~60 containers in one namespace, same query throughout:
+
+| `--max-log-requests` | `--qps` | wall clock | warnings on stderr |
+|---|---|---|---|
+| 5 (the `--no-follow` default) | default | **29s** | none |
+| 5 | `-1` | **3s** | none |
+| 20 | default | **27s** | 3 |
+| 20 | `-1` | **2s** | none |
+
+The default is client-go's own: **QPS 5, burst 10**. Sixty containers means sixty log requests, so
+fifty of them queue behind a five-per-second refill — around ten seconds of pure waiting before any
+per-request latency, and more once list and watch calls are counted.
+
+**At default concurrency the wait is silent.** The `"client-side throttling"` warnings appear only
+once `--max-log-requests` is raised, because higher concurrency makes individual waits long enough
+to cross klog's reporting threshold. The common case is a thirty-second command with nothing on
+stderr to explain it — so treat an unexplained slow wide query as throttling until shown otherwise.
+
+`--qps=-1` disables client-side throttling entirely and defers to the API server's own priority and
+fairness. On a shared cluster you do not control, prefer explicit values — `--qps 50 --burst 100` —
+so stern cannot become the noisy neighbour.
 
 ### Exclude the noise
 
