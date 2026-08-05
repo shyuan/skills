@@ -136,13 +136,15 @@ as a blocking foreground call.
 
 ## Piping into other tools
 
-Three ways to get an empty result that looks like a clean one. All three are avoidable:
+Four ways a stern pipeline reports something other than what happened — the first three turn a
+failure into a clean-looking empty result, the fourth turns healthy data into a failure:
 
 | mistake | what happens | instead |
 |---|---|---|
 | `2>&1 \| jq` | the `+ pod › container` attach lines are on **stderr**; merging them in feeds `jq` a non-JSON line, `jq` aborts, the pipeline yields nothing | never merge stderr into a JSON pipe |
 | `2>/dev/null \| jq` | quiet, but it also discards stern's real errors — RBAC `forbidden`, a bad `--context`, a template that failed to expand | `--only-log-lines` |
 | ignoring the exit status | `jq` succeeds on empty input, so `$?` reports the *last* command; a failed stern run reads as success | `set -o pipefail` (portable), or check the first command's status — `${PIPESTATUS[0]}` in bash, `${pipestatus[1]}` in zsh |
+| `-o raw \| jq` on a **mixed** stream | framework lines are plain text; `jq` aborts on the first one and yields nothing — exit 5, which `pipefail` propagates as pipeline failure even though the logs were fine | `-i '^\s*\{'` to drop them at the source, or `jq -R 'fromjson? \| …'` |
 
 `--only-log-lines` is the right tool because it suppresses the status lines **at the source** — they
 are printed under `if !OnlyLogLines` — while errors go to stderr through a different path that the
@@ -174,11 +176,13 @@ st=("${pipestatus[@]}")     # zsh; bash: st=("${PIPESTATUS[@]}")
 echo "checking"             # too late if this comes first — the array is now echo's status
 ```
 
+The recipes below assume `pipefail` is set:
+
 ```bash
 set -o pipefail
 
-# app logs are JSON: strip stern's prefix, hand to jq
-stern deploy/api -n prod --no-follow --tail 200 -o raw --only-log-lines \
+# app logs are JSON — -i '^\s*\{' drops framework/plain-text lines so jq never sees them
+stern deploy/api -n prod --no-follow --tail 200 -o raw --only-log-lines -i '^\s*\{' \
   | jq -r 'select(.level=="error") | .msg'
 
 # stern's own envelope as JSON (keeps pod/container/namespace)
@@ -189,6 +193,31 @@ stern deploy/api -n prod --no-follow --tail 200 -o json --only-log-lines \
 stern deploy/api -n prod --no-follow --since 1h -o json -i ERROR --only-log-lines \
   | jq -r .podName | sort | uniq -c | sort -rn
 ```
+
+**Only `-o raw` needs the `-i '^\s*\{'` guard.** `-o json` is stern's own envelope and is always valid
+JSON whatever the application logs look like; `-o raw` passes the application's line through
+untouched, and a stream that mixes formats is the normal shape of a Go service — `fx`, GORM and
+stdlib `log` write plain text into the same stream as a JSON application logger. Without the guard
+`jq` aborts on the first plain-text line, prints nothing, and exits 5, which `pipefail` then reports
+as a failed pipeline even though the logs were healthy.
+
+Guarding at the stern end is preferred for the same reason `--include` beats piping to `grep`: it
+applies before the line is formatted. Where the stern side cannot be changed, guard on the `jq` side
+instead — `jq -R 'fromjson? | select(.level=="error") | .msg' -r` skips unparseable lines and exits
+0.
+
+**The two are not equivalent, and the difference can hide an error.** A pattern guard decides by
+*shape*; `fromjson?` decides by whether the line actually parses. `^\s*\{` therefore tolerates
+leading whitespace (`^\{` alone would not — it silently drops an indented record, at exit 0, with no
+sign anything was lost), but both pattern forms still assume:
+
+| assumption | what breaks it | consequence |
+|---|---|---|
+| one JSON value per line | a pretty-printed multi-line object | the guard keeps only the `{` line; `fromjson?` fails on it too — reconfigure the logger to single-line JSON |
+| the value is an object | a top-level array or scalar log line | dropped by the guard, kept by `fromjson?` |
+
+When you cannot characterise the stream, `fromjson?` is the safer of the two: it errs toward keeping
+lines, and a guard that errs toward dropping them is how an error goes missing quietly.
 
 Do not add `-t` to any of these: it prefixes the timestamp into the message, so `-o raw | jq` stops
 being valid JSON and `-o json`'s `.message` gains a timestamp prefix.
