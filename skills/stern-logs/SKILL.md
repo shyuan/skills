@@ -142,12 +142,13 @@ stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
 # no pipe: stern's own exit status is the answer
 stern deploy/api --no-follow --tail 100 -o json --only-log-lines
 
-# piped: pipefail belongs in the command, not in a footnote
+# piped: pipefail belongs in the command, not in a footnote.
+# -i '^\{' keeps plain-text framework lines away from jq
 set -o pipefail
-stern deploy/api --no-follow --tail 100 -o raw --only-log-lines | jq
+stern deploy/api --no-follow --tail 100 -o raw --only-log-lines -i '^\{' | jq
 ```
 
-Two things make a failed query look like a clean empty one, and both are in that snippet:
+Three things in that snippet, each preventing a different wrong answer:
 
 - **`--only-log-lines`, not a redirect.** The `+ pod › container` attach lines go to stderr, so
   `2>&1 | jq` feeds `jq` a non-JSON line and the pipeline aborts to nothing; `2>/dev/null` avoids
@@ -158,6 +159,10 @@ Two things make a failed query look like a clean empty one, and both are in that
   status rather than `$?`: `${PIPESTATUS[0]}` in bash, `${pipestatus[1]}` in zsh (lowercase, and
   1-indexed). Using the bash spelling under zsh expands to an empty string, which reads as "did not
   fail" — the exact failure this bullet exists to prevent, on the shell macOS defaults to.
+- **`-i '^\{'` with `-o raw`.** `-o raw` passes the application's own line through, and real services
+  mix formats — framework and stdlib lines are plain text alongside the JSON logger. `jq` aborts on
+  the first one, prints nothing and exits 5, which `pipefail` turns into a failed pipeline for
+  perfectly healthy logs. `-o json` needs no guard: that envelope is always valid JSON.
 
 For the `-o json` field names, the other predefined outputs, and `--template` for reshaping JSON
 application logs into something readable, see [references/templates.md](references/templates.md).
