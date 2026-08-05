@@ -85,16 +85,23 @@ Defaults for any flag, at `~/.config/stern/config.yaml`:
 ```yaml
 # <flag name>: <value>
 tail: 10
-max-log-requests: 999
-qps: -1               # without this, max-log-requests alone does not make wide queries faster
 timestamps: short
+qps: 50               # bounded, not -1 — this applies to every stern you ever run
+burst: 100
+max-log-requests: 50
 pod-colors: "32,33,34,35,36,37"
 container-colors: "32;4,33;4,34;4,35;4,36;4,37;4"
 ```
 
-`max-log-requests: 999` reads like a performance setting and is not one on its own — it raises the
-concurrency ceiling while every request still queues behind the default rate limiter. Pair it with
-`qps` or the ceiling buys nothing.
+**Tune throttling per command, not in the config file.** `--qps=-1` is reasonable on the one wide
+query you are running right now and watching; the same value here applies to every invocation
+forever, including ones you fire without thinking on a cluster you share. Bounded values give most
+of the speed-up and cannot make stern the noisy neighbour.
+
+The same asymmetry applies to concurrency. Upstream's example uses `max-log-requests: 999`, which
+reads like a performance setting and is not one on its own — it raises the ceiling while every
+request still queues behind the rate limiter, so without a `qps` change it buys nothing, and with
+one it buys hundreds of simultaneously open connections you did not ask for.
 
 A config file on the machine changes what a bare `stern` command does — when output looks unexpected
 (e.g. timestamps you did not ask for), check it. Pass explicit flags in scripts rather than relying
