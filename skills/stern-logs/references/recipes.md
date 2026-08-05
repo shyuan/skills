@@ -217,7 +217,12 @@ array or scalar parses successfully, reaches the field filter, and raises a per-
 $ printf '{"level":"error","msg":"flat"}\n["top","level"]\n42\n' \
   | jq -R 'fromjson? | select(.level=="error") | .msg' -r
 jq: error (at <stdin>:2): Cannot index array with string ("level")
+jq: error (at <stdin>:3): Cannot index number with string ("level")
+flat
 ```
+
+One error per offending record — the array and the scalar each raise their own — and the valid
+record still comes through on stdout, which is what makes the failure easy to miss.
 
 And that error need not reach the exit code, because `jq` reports the status of the **last** input
 it processed. The same records in a different order give different statuses:
@@ -248,10 +253,17 @@ silently at exit 0, so reconfigure the logger to single-line JSON rather than wo
 Neither guard reports what it dropped. Where silent loss is unacceptable, count instead of trusting
 the exit status:
 
+Measure the guard **alone** — with no `select` in the expression, the two numbers differ only by
+what the guard dropped:
+
 ```bash
-# stderr gets the line count going in, stdout the count coming out; a gap is what was dropped
-stern … --only-log-lines | tee >(wc -l >&2) | jq -R 'fromjson? | objects | …' -r | wc -l
+# stderr: lines in. stdout: objects kept. The gap is the guard's silent loss.
+stern … --only-log-lines | tee >(wc -l >&2) | jq -R 'fromjson? | objects' -c | wc -l
 ```
+
+Adding your real filter to this pipeline makes the gap meaningless: `select(.level=="error")` drops
+valid objects by design, and the count cannot tell that apart from a record the guard swallowed. Run
+the measurement as its own pass, then run the query.
 
 Do not add `-t` to any of these: it prefixes the timestamp into the message, so `-o raw | jq` stops
 being valid JSON and `-o json`'s `.message` gains a timestamp prefix.
