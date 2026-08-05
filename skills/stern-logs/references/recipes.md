@@ -258,8 +258,13 @@ what the guard dropped:
 
 ```bash
 # stderr: lines in. stdout: objects kept. The gap is the guard's silent loss.
-stern … --only-log-lines | tee >(wc -l >&2) | jq -R 'fromjson? | objects' -c | wc -l
+stern deploy/api -n prod --no-follow --tail 200 -o raw --only-log-lines \
+  | tee >(wc -l >&2) | jq -R 'fromjson? | objects' -c | wc -l
 ```
+
+`-o raw` is required, not incidental. Under the default template every line arrives prefixed with
+the pod and container name, so `fromjson?` rejects all of them and the gap reads as total loss when
+nothing was lost at all.
 
 Adding your real filter to this pipeline makes the gap meaningless: `select(.level=="error")` drops
 valid objects by design, and the count cannot tell that apart from a record the guard swallowed. Run
