@@ -33,7 +33,9 @@ watch a live stream, and it runs as a background command with a stated stop cond
 
 The second half of the law: **bound the volume**. The defaults are `--since 48h` and `--tail -1`
 (*every* line ever retained), multiplied by every matching pod. Always narrow at least one of
-`--tail` / `--since`.
+`--tail` / `--since` — and **both** once the query spans more than a handful of containers, since
+they are what truncates each stream. Narrowing *which* containers are read at all (`-E`,
+`--exclude-pod`, `-l`, a tighter query) saves more and costs nothing; line filters save neither.
 
 ### Rationalization table
 
@@ -113,7 +115,9 @@ config file that may silently be changing those defaults, read
 [references/flags.md](references/flags.md) — guessing a flag name costs a failed invocation.
 
 `--include` / `-i` and `--exclude` / `-e` filter **log lines** (regex, repeatable) — prefer them over
-piping to `grep`, because they apply before the lines are formatted:
+piping to `grep`, because they apply before the lines are formatted. They do not make the query
+cheaper: filtering happens locally on lines already received. To spend less, cut containers with the
+selection flags above, or truncate with `--tail`/`--since`.
 
 ```bash
 stern deploy/api --no-follow --tail 200 -i 'ERROR|panic' -e 'health.?check'
@@ -197,6 +201,7 @@ application logs into something readable, see [references/templates.md](referenc
 | no logs from a crash-looping pod | not a state-filter problem: the default `--container-state all` already covers it, and stern falls back to the last terminated instance's logs. Check `--since`/`--tail` first. `--container-state terminated` would *exclude* it — CrashLoopBackOff is `waiting` |
 | a container is skipped entirely | it has no container ID yet (never started — image pull failure, etc.); its logs do not exist, use `kubectl describe pod` |
 | a wide query takes ~30s with no error, or logs `"client-side throttling"` | client-go's default rate limiter (QPS 5, burst 10), not stern or the cluster. `--max-log-requests` does **not** affect it — add `--qps=-1`, or `--qps 50 --burst 100` on a shared cluster. At default concurrency the wait is silent, so assume throttling before blaming the API server |
+| still slow after `--qps=-1` | transfer volume, not rate limiting. `--include`/`--exclude` filter **client-side**, so a filtered query reads exactly as much as an unfiltered one. Drop whole containers first (`-E`, `--exclude-pod`, `-l`, a tighter query), then truncate what remains with `--tail`/`--since` |
 | ANSI garbage in captured output | `--color never` |
 | `--timestamps short` gives the long format | the `=` cannot be omitted. `--timestamps short` silently ignores the value and falls back to the full format — no error. Write `--timestamps=short`, or bare `-t` |
 | `parseJSON` template suddenly hits its `else` branch | `-t` is on: it prefixes the timestamp into `.Message`. Drop `-t` when parsing JSON |

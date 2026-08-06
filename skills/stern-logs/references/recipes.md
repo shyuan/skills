@@ -68,20 +68,47 @@ ones whose logs explain a stuck rollout.
 ### One error string across a whole namespace
 
 ```bash
-stern . -n prod --no-follow --since 1h --tail -1 -i 'connection refused' \
+stern . -n prod --no-follow --since 1h --tail 1000 -i 'connection refused' \
   --only-log-lines --color never --qps=-1 --max-log-requests 20
 ```
 
-`--tail -1` (all retained lines) is safe here *because* `--since` and `--include` bound the result —
-never combine an unbounded `--tail` with an unbounded `--since`.
+**`--include` does not bound the transfer.** The Kubernetes log API has no server-side line filter,
+so every line in the window crosses the wire and the `-i` regex runs locally, on lines already
+received. Three different levers, only two of which cost anything:
+
+| lever | flags | effect |
+|---|---|---|
+| which streams are requested at all | the pod query, `-c`, `-E`, `--exclude-pod`, `-l`, `--field-selector`, `--node`, `--container-state` | skips whole containers — the largest saving on a wide query, and free |
+| how much of each stream | `--tail`, `--since` (the API's `TailLines` and `SinceSeconds`/`SinceTime`) | truncates every stream that is requested |
+| nothing | `-i`, `-e` | runs on lines already received |
+
+Reach for the first row before the second: dropping `istio-proxy` with `-E` on a mesh namespace
+removes those containers entirely, where `--tail` only shortens them.
+
+On ~60 containers, with `--qps=-1` so throttling is out of the picture:
+
+| `--tail` | wall clock | bytes received |
+|---|---|---|
+| `-1` | **30s** | 34.5 MB |
+| `1000` | **4s** | 10.7 MB |
+| `100` | 2s | — |
+
+Identical results either way — the filter discards the difference after paying for it. Adding `-i`
+to the `--tail -1` run prints nothing and still takes 30s.
+
+So bound **both** on any wide search, and keep `--tail -1` for a single container whose full history
+you actually want.
 
 ### The same, cluster-wide
 
 ```bash
-stern . -A --no-follow --since 15m -i 'panic' --color never --qps=-1 --max-log-requests 50
+stern . -A --no-follow --since 15m --tail 500 -i 'panic' --color never \
+  --qps=-1 --max-log-requests 50
 ```
 
-`-A` overrides `-n` entirely. The default output template gains a namespace column under `-A`.
+`-A` overrides `-n` entirely — a `-n` guard on the command line will not save you here. The default
+output template gains a namespace column under `-A`, and the transfer covers every namespace, so
+`--tail` matters more the wider the query goes, not less.
 
 ### Why both recipes carry `--qps=-1`
 
@@ -93,10 +120,13 @@ Measured on ~60 containers in one namespace, same query throughout:
 
 | `--max-log-requests` | `--qps` | wall clock | warnings on stderr |
 |---|---|---|---|
-| 5 (the `--no-follow` default) | default | **29s** | none |
-| 5 | `-1` | **3s** | none |
-| 20 | default | **27s** | 3 |
-| 20 | `-1` | **2s** | none |
+| 5 (the `--no-follow` default) | default | **27–29s** | none |
+| 5 | `-1` | **2–4s** | none |
+| 20 | default | **27–29s** | 3 |
+| 20 | `-1` | **2–4s** | none |
+
+Ranges, not points — repeated runs vary. `--qps=5 --burst=10` reproduces the default timing exactly,
+which is what pins client-go's 5/10 defaults to the observed cost.
 
 The default is client-go's own: **QPS 5, burst 10**. Sixty containers means sixty log requests, so
 fifty of them queue behind a five-per-second refill — around ten seconds of pure waiting before any
