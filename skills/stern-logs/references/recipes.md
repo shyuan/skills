@@ -72,9 +72,18 @@ stern . -n prod --no-follow --since 1h --tail 1000 -i 'connection refused' \
   --only-log-lines --color never --qps=-1 --max-log-requests 20
 ```
 
-**`--since` and `--tail` bound the transfer; `--include` does not.** The Kubernetes log API has no
-server-side grep — `PodLogOptions` carries only `SinceSeconds`/`SinceTime` and `TailLines` — so every
-line in the window crosses the wire and the `-i` regex runs locally, on lines already received.
+**`--include` does not bound the transfer.** The Kubernetes log API has no server-side line filter,
+so every line in the window crosses the wire and the `-i` regex runs locally, on lines already
+received. Three different levers, only two of which cost anything:
+
+| lever | flags | effect |
+|---|---|---|
+| which streams are requested at all | the pod query, `-c`, `-E`, `--exclude-pod`, `-l`, `--field-selector`, `--node`, `--container-state` | skips whole containers — the largest saving on a wide query, and free |
+| how much of each stream | `--tail`, `--since` (the API's `TailLines` and `SinceSeconds`/`SinceTime`) | truncates every stream that is requested |
+| nothing | `-i`, `-e` | runs on lines already received |
+
+Reach for the first row before the second: dropping `istio-proxy` with `-E` on a mesh namespace
+removes those containers entirely, where `--tail` only shortens them.
 
 On ~60 containers, with `--qps=-1` so throttling is out of the picture:
 
