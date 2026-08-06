@@ -173,9 +173,10 @@ once `--max-log-requests` is raised, because higher concurrency makes individual
 to cross klog's reporting threshold. The common case is a thirty-second command with nothing on
 stderr to explain it — so treat an unexplained slow wide query as throttling until shown otherwise.
 
-`--qps=-1` disables client-side throttling entirely and defers to the API server's own priority and
-fairness. On a shared cluster you do not control, prefer explicit values — `--qps 50 --burst 100` —
-so stern cannot become the noisy neighbour.
+`--qps=-1` disables client-side throttling entirely, and nothing downstream takes over: the API
+server's priority-and-fairness filter skips long-running `CONNECT` requests, which is what pod log
+is. On a shared cluster you do not control, prefer explicit values — `--qps 50 --burst 100` — so
+stern cannot become the noisy neighbour, since no server-side queue will hold it back for you.
 
 ### Exclude the noise
 
