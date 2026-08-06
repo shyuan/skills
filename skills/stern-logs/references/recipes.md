@@ -85,23 +85,32 @@ received. Three different levers, only two of which cost anything:
 The first two levers **compound** — they do not overlap, so use both. On ~60 containers with
 `--qps=-1` and `--since 1h`:
 
-| flags | bytes received | saving |
+| flags | bytes received | vs. `--tail 1000` |
 |---|---|---|
-| `--tail -1` | 36.6 MB | — |
-| `--tail -1 -E istio` | 19.2 MB | 47% |
-| `--tail 1000` | 13.9 MB | 62% |
-| `--tail 1000 -E istio` | **6.9 MB** | **81%** |
+| `--tail -1` | ~43 MB, and rising with log volume | 3.1× |
+| `--tail -1 -E istio` | ~27 MB, likewise | 1.9× |
+| `--tail 1000` | **13.8 MB** | 1× |
+| `--tail 1000 -E istio` | **6.7 MB** | **0.5×** |
 
 Truncating each stream and skipping whole containers multiply. On a mesh namespace the answer is not
 "scope rather than truncate" but both.
 
+The comparison is against the bounded row on purpose, because it is the only kind that holds still.
+`--tail N` caps the read at N lines per container, so once containers are chattier than N it is a
+constant — 13.9, 13.8, 13.75 MB across three sessions. `--tail -1` reads whatever the window
+actually holds and climbs as the namespace gets busier: 36.6, 40.4, 43.0 MB over the same three.
+Quote savings against the unbounded row and the percentage moves on its own.
+
+**Bounding `--tail` is what makes a measurement repeatable**, which is a second reason to do it
+beyond cost — you cannot tell a change from drift against a baseline that drifts.
+
 Adding `-i` to any of these changes nothing: same bytes, same time. It prints fewer lines, having
 already paid for all of them.
 
-**Measure bytes, not seconds.** The byte counts above reproduce run to run; wall clock does not.
-Time tracks bytes when transfer is the cost — roughly 2–3× between `--tail -1` and `--tail 1000` on
-this shape of namespace — but the absolute numbers depend on the cluster and on what else has been
-hitting the API server recently. A ratio far larger than the byte ratio means something other than
+**Measure bytes, not seconds.** The bounded byte counts above reproduce run to run; wall clock does
+not. Time tracks bytes when transfer is the cost — roughly 2–3× between `--tail -1` and
+`--tail 1000` on this shape of namespace — but the absolute numbers depend on the cluster and on
+what else has been hitting the API server recently. A ratio far larger than the byte ratio means something other than
 volume is in the measurement, usually throttling somewhere. Note too that `--qps=-1` removes only
 the *client-side* limiter: the API server's own priority and fairness still applies and reports
 nothing back to stern, so `-1` buys a faster run, not a guaranteed one.
