@@ -82,22 +82,32 @@ received. Three different levers, only two of which cost anything:
 | how much of each stream | `--tail`, `--since` (the API's `TailLines` and `SinceSeconds`/`SinceTime`) | truncates every stream that is requested |
 | nothing | `-i`, `-e` | runs on lines already received |
 
-Reach for the first row before the second: dropping `istio-proxy` with `-E` on a mesh namespace
-removes those containers entirely, where `--tail` only shortens them.
+The first two levers **compound** — they do not overlap, so use both. On ~60 containers with
+`--qps=-1` and `--since 1h`:
 
-On ~60 containers, with `--qps=-1` so throttling is out of the picture:
-
-| `--tail` | wall clock | bytes received |
+| flags | bytes received | saving |
 |---|---|---|
-| `-1` | **30s** | 34.5 MB |
-| `1000` | **4s** | 10.7 MB |
-| `100` | 2s | — |
+| `--tail -1` | 36.6 MB | — |
+| `--tail -1 -E istio` | 19.2 MB | 47% |
+| `--tail 1000` | 13.9 MB | 62% |
+| `--tail 1000 -E istio` | **6.9 MB** | **81%** |
 
-Identical results either way — the filter discards the difference after paying for it. Adding `-i`
-to the `--tail -1` run prints nothing and still takes 30s.
+Truncating each stream and skipping whole containers multiply. On a mesh namespace the answer is not
+"scope rather than truncate" but both.
 
-So bound **both** on any wide search, and keep `--tail -1` for a single container whose full history
-you actually want.
+Adding `-i` to any of these changes nothing: same bytes, same time. It prints fewer lines, having
+already paid for all of them.
+
+**Measure bytes, not seconds.** The byte counts above reproduce run to run; wall clock does not.
+Time tracks bytes when transfer is the cost — roughly 2–3× between `--tail -1` and `--tail 1000` on
+this shape of namespace — but the absolute numbers depend on the cluster and on what else has been
+hitting the API server recently. A ratio far larger than the byte ratio means something other than
+volume is in the measurement, usually throttling somewhere. Note too that `--qps=-1` removes only
+the *client-side* limiter: the API server's own priority and fairness still applies and reports
+nothing back to stern, so `-1` buys a faster run, not a guaranteed one.
+
+So bound **both** `--tail` and `--since` on any wide search, and keep `--tail -1` for a single
+container whose full history you actually want.
 
 ### The same, cluster-wide
 
@@ -127,6 +137,10 @@ Measured on ~60 containers in one namespace, same query throughout:
 
 Ranges, not points — repeated runs vary. `--qps=5 --burst=10` reproduces the default timing exactly,
 which is what pins client-go's 5/10 defaults to the observed cost.
+
+Unlike the transfer figures above, these absolutes *do* reproduce a day later on a rested cluster:
+a rate limiter is deterministic arithmetic, `n` requests at 5/s, independent of what else is going
+on. That is why this table gives seconds and the transfer table gives bytes.
 
 The default is client-go's own: **QPS 5, burst 10**. Sixty containers means sixty log requests, so
 fifty of them queue behind a five-per-second refill — around ten seconds of pure waiting before any
