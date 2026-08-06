@@ -58,9 +58,20 @@ def run_once(query: str, name: str, desc: str) -> dict:  # noqa: D401
         # Iterating proc.stdout blocks forever if the invocation stalls without
         # closing the pipe, and one stalled run would hang the whole sweep. Kill
         # it on a deadline; the reader then falls out when the pipe closes.
+        #
+        # The timer fires on schedule even when the run has just finished, so it
+        # must not claim a timeout it did not cause: a run that completed at the
+        # deadline would otherwise be counted as a harness stall, which is the
+        # exact confusion timed_out exists to remove.
+        done_lock = threading.Lock()
+        finished = False
+
         def _kill_on_timeout() -> None:
             nonlocal timed_out
-            timed_out = True
+            with done_lock:
+                if finished or proc.poll() is not None:
+                    return
+                timed_out = True
             proc.kill()
 
         watchdog = threading.Timer(TIMEOUT, _kill_on_timeout)
@@ -96,6 +107,8 @@ def run_once(query: str, name: str, desc: str) -> dict:  # noqa: D401
                 if triggered:
                     break
         finally:
+            with done_lock:
+                finished = True
             watchdog.cancel()
             proc.terminate()
             try:
