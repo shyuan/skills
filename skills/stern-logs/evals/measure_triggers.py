@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -45,6 +46,7 @@ def run_once(query: str, name: str, desc: str) -> dict:  # noqa: D401
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     tools: list[str] = []
     triggered = False
+    timed_out = False
     try:
         proc = subprocess.Popen(
             ["claude", "-p", query, "--output-format", "stream-json",
@@ -52,6 +54,17 @@ def run_once(query: str, name: str, desc: str) -> dict:  # noqa: D401
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             cwd=str(REPO), env=env, text=True,
         )
+
+        # Iterating proc.stdout blocks forever if the invocation stalls without
+        # closing the pipe, and one stalled run would hang the whole sweep. Kill
+        # it on a deadline; the reader then falls out when the pipe closes.
+        def _kill_on_timeout() -> None:
+            nonlocal timed_out
+            timed_out = True
+            proc.kill()
+
+        watchdog = threading.Timer(TIMEOUT, _kill_on_timeout)
+        watchdog.start()
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -83,6 +96,7 @@ def run_once(query: str, name: str, desc: str) -> dict:  # noqa: D401
                 if triggered:
                     break
         finally:
+            watchdog.cancel()
             proc.terminate()
             try:
                 proc.wait(timeout=10)
@@ -90,7 +104,7 @@ def run_once(query: str, name: str, desc: str) -> dict:  # noqa: D401
                 proc.kill()
     finally:
         cmd_file.unlink(missing_ok=True)
-    return {"triggered": triggered, "tools": tools[:6]}
+    return {"triggered": triggered, "tools": tools[:6], "timed_out": timed_out}
 
 
 def main() -> int:
@@ -113,9 +127,10 @@ def main() -> int:
             pass
         for fut, (i, _item) in futures.items():
             try:
-                results[i].append(fut.result())
+                results[i].append(fut.result(timeout=TIMEOUT + 60))
             except Exception as exc:  # noqa: BLE001
-                results[i].append({"triggered": False, "tools": [], "error": str(exc)})
+                results[i].append({"triggered": False, "tools": [],
+                                   "timed_out": True, "error": str(exc)})
             print(".", end="", flush=True, file=sys.stderr)
     print(file=sys.stderr)
 
@@ -132,6 +147,7 @@ def main() -> int:
             fp, tn = (fp + 1, tn) if fired else (fp, tn + 1)
         out.append({
             "query": item["query"],
+            "timed_out_runs": sum(1 for r in rs if r.get("timed_out")),
             "should_trigger": item["should_trigger"],
             "hits": hits,
             "runs": len(rs),
