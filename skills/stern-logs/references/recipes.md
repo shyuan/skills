@@ -110,10 +110,16 @@ already paid for all of them.
 **Measure bytes, not seconds.** The bounded byte counts above reproduce run to run; wall clock does
 not. Time tracks bytes when transfer is the cost — roughly 2–3× between `--tail -1` and
 `--tail 1000` on this shape of namespace — but the absolute numbers depend on the cluster and on
-what else has been hitting the API server recently. A ratio far larger than the byte ratio means something other than
-volume is in the measurement, usually throttling somewhere. Note too that `--qps=-1` removes only
-the *client-side* limiter: the API server's own priority and fairness still applies and reports
-nothing back to stern, so `-1` buys a faster run, not a guaranteed one.
+what else has been hitting the API server recently. A ratio far larger than the byte ratio means
+something other than volume is in the measurement, usually throttling somewhere.
+
+`--qps=-1` removes the client-side limiter, which on this workload is the only rate limiting in
+play: pod log requests are long-running `CONNECT` requests, and the API server's priority-and-
+fairness filter skips those, so they neither take seats nor queue. That makes `-1` reliably fast
+against an idle control plane — but not guaranteed, because API server CPU, etcd latency and
+kubelet-side contention are all still upstream of the logs, and none of them report anything back to
+stern. Bounded values stay the better default on a cluster you share, for the original reason: not
+being the noisy neighbour.
 
 So bound **both** `--tail` and `--since` on any wide search, and keep `--tail -1` for a single
 container whose full history you actually want.
@@ -147,7 +153,7 @@ Measured on ~60 containers in one namespace, same query throughout:
 Ranges, not points — repeated runs vary. `--qps=5 --burst=10` reproduces the default timing exactly,
 which is what pins client-go's 5/10 defaults to the observed cost.
 
-Unlike the transfer figures above, these absolutes *do* reproduce a day later on a rested cluster:
+Unlike the transfer figures above, these absolutes reproduce a day later on the same rested cluster:
 a rate limiter is deterministic arithmetic, `n` requests at 5/s, independent of what else is going
 on. That is why this table gives seconds and the transfer table gives bytes.
 
@@ -155,14 +161,22 @@ The default is client-go's own: **QPS 5, burst 10**. Sixty containers means sixt
 fifty of them queue behind a five-per-second refill — around ten seconds of pure waiting before any
 per-request latency, and more once list and watch calls are counted.
 
+The arithmetic is the durable part, not the absolute. The same sweep on an idle single-node cluster
+measures **10.4s** at the default and 0.3s at `--qps=-1` — against the ten seconds predicted above,
+where the managed cluster sat at 27–29s for the identical query. The limiter contributes the same
+`(n − burst) / qps` everywhere; what varies is everything stacked on top of it. Treat that figure as
+the floor a wide query cannot go below without `--qps`, and a result well above it as a question
+about the cluster rather than about stern.
+
 **At default concurrency the wait is silent.** The `"client-side throttling"` warnings appear only
 once `--max-log-requests` is raised, because higher concurrency makes individual waits long enough
 to cross klog's reporting threshold. The common case is a thirty-second command with nothing on
 stderr to explain it — so treat an unexplained slow wide query as throttling until shown otherwise.
 
-`--qps=-1` disables client-side throttling entirely and defers to the API server's own priority and
-fairness. On a shared cluster you do not control, prefer explicit values — `--qps 50 --burst 100` —
-so stern cannot become the noisy neighbour.
+`--qps=-1` disables client-side throttling entirely, and nothing downstream takes over: the API
+server's priority-and-fairness filter skips long-running `CONNECT` requests, which is what pod log
+is. On a shared cluster you do not control, prefer explicit values — `--qps 50 --burst 100` — so
+stern cannot become the noisy neighbour, since no server-side queue will hold it back for you.
 
 ### Exclude the noise
 
