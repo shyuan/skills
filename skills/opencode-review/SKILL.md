@@ -73,6 +73,8 @@ Optional environment overrides:
 - `OPENCODE_REVIEW_AGENT=<name>` — escape hatch: run a single **pre-configured** opencode
   agent via `--agent` (must be `mode:primary`).
 - `OPENCODE_REVIEW_RULES=0` — disable the file-type checklist injection (default on).
+- `OPENCODE_REVIEW_DEP_DIRS=<dir>[:<dir>…]` — extra dependency-source directories the file
+  tools may read (Go's `GOMODCACHE` and `$CARGO_HOME/registry` are detected automatically).
 - `OPENCODE_REVIEW_FACTCHECK=0` — disable the phase-3 fact-check pass (default on).
 - `OPENCODE_REVIEW_FACTCHECK_MODEL=<id>` — model for the fact-check pass (default
   `opencode-go/deepseek-v4-pro`; reasoning-strong and independent of the chair model).
@@ -155,8 +157,9 @@ These are already true in the user's environment; only check them if the run fai
 - Driven by `--model` (not `--agent`): self-contained (no config dependency) and avoids the
   `mode:subagent`-as-top-level self-replication fork bomb.
 - `--pure` skips external plugins, so startup is lean and there's no port to collide on.
-- `OPENCODE_PERMISSION` is set **for this run only** (the saved config is untouched):
-  `edit` is denied, and bash is **default-deny with a read-only allow-list** (git reads plus
+- `OPENCODE_PERMISSION` is set **for this run only** — it is merged with the saved config
+  rather than substituted for it, and the saved config is not modified. `edit` is denied, and
+  bash is **default-deny with a read-only allow-list** (git reads plus
   `cat`/`head`/`tail`/`wc`/`ls`/`grep`/`rg`). Trailing deny patterns for shell metacharacters
   (`;`, `|`, `&`, `>`, backticks, `$(`, `<(`, newline) override the allows, so an allowed
   prefix can't smuggle chained commands, pipes into a shell, or redirection writes. The diff
@@ -164,6 +167,22 @@ These are already true in the user's environment; only check them if the run fai
   injection as well as keeping the (possibly uncommitted) work tree read-only — though glob
   matching makes it defense-in-depth, not a hard sandbox. `question` and `doom_loop` are
   denied so the run can't stall waiting for input that will never come headless.
+- **What the boundary actually is.** The bash patterns are path-agnostic — `head *` matches
+  `head /anywhere` — so the allow-list restricts *commands*, not *paths*: reads outside the
+  repo have always been possible when spelled as a shell command. The file tools are gated
+  separately by `external_directory`, whose default for an unlisted path is "ask", i.e. an
+  auto-reject headless. The two routes therefore used to disagree about the same file, which
+  cost members turns on rejected `Read` calls (#24). The script now allows file-tool reads
+  under the dependency caches it finds (`go env GOMODCACHE`, `$CARGO_HOME/registry`, plus
+  anything in `OPENCODE_REVIEW_DEP_DIRS`) so the ergonomic route works where it matters: for a
+  diff whose assertions encode a dependency's contract, that source *is* the review question.
+  Only allows are written, never a blanket deny — a `"*":"deny"` here would also override
+  opencode's own entries and any the user has configured, since the two are merged.
+- **The personas state these boundaries up front** rather than letting models find them by
+  hitting them: no test/build execution (that would run code from the untrusted diff), what is
+  readable and how, no retrying a rejected call, and — because two members once ended a run on
+  a rejected call having written nothing — produce a report regardless, noting what could not
+  be verified.
 - `GIT_PAGER=cat` / `PAGER=cat` stop git from opening a pager that would hang in a non-TTY.
 - The two members run in parallel, then the chair runs once, then the optional fact-check runs
   once — so a large diff can take a few minutes. Each model run has its own timeout; a hung
