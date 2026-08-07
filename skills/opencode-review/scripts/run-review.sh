@@ -343,22 +343,33 @@ REPORT_END='<<<END-REVIEW-REPORT>>>'
 # a stray heading or a courtesy line, not a report; the stage is reported as blank.
 REPORT_MIN_BYTES=40
 
-# Where a transcript is kept when its report could not be extracted cleanly, so
-# the next occurrence can be diagnosed instead of guessed at. Every other copy is
-# a mktemp file removed on exit, and a blank stage prints nothing — without this
+# Where a transcript is kept when no report could be extracted from it, so the
+# next occurrence can be diagnosed instead of guessed at. Every other copy is a
+# mktemp file removed on exit, and a blank stage prints nothing — without this
 # there is no way to tell "the model said nothing" from "the de-noiser ate it".
-KEEP_DIR="${TMPDIR:-/tmp}"
+#
+# The directory is created by mktemp -d on first use: atomically, mode 700, under
+# an unpredictable name. A fixed name under a shared /tmp would let a local user
+# pre-place a path there — clobbering the evidence, or, since cp follows a
+# destination symlink, diverting a transcript that contains the diff under review.
+KEEP_DIR=""
 
-# retain_transcript <transcript> <stage-label> -> prints the kept path, if any.
-# Skips an empty transcript: there is nothing in it to diagnose.
+# retain_transcript <transcript> <stage-label> -> sets KEPT_PATH ("" if not kept).
+# Skips an empty transcript: there is nothing in it to diagnose. Assigns rather
+# than prints so KEEP_DIR survives — a command substitution would subshell it
+# away and every stage would make its own directory.
+KEPT_PATH=""
 retain_transcript() {
-  local kept
+  KEPT_PATH=""
   [ -s "$1" ] || return 0
-  kept="${KEEP_DIR%/}/opencode-review-$2-$$.log"
-  cp "$1" "$kept" 2>/dev/null && printf '%s' "$kept"
+  if [ -z "$KEEP_DIR" ]; then
+    KEEP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/opencode-review-XXXXXXXX" 2>/dev/null)" || return 0
+    [ -n "$KEEP_DIR" ] || return 0
+  fi
+  cp "$1" "$KEEP_DIR/$2.log" 2>/dev/null && KEPT_PATH="$KEEP_DIR/$2.log"
 }
 
-# denoise <transcript> <lenient 0|1>
+# denoise <transcript>
 # Prints the report on stdout; exits 0 if it came from between the fences, 1 if
 # the fences were absent and the de-noised transcript was used instead.
 #
@@ -374,16 +385,8 @@ retain_transcript() {
 # So after a banner we skip continuation lines that look like structured-error
 # spill — brackets, quoted keys, "Error message:" — and treat the first line that
 # does not as the model's prose.
-#
-# lenient=1 drops the tool-output rule and keeps every plain line, because that
-# rule is the one that can swallow a whole report: it ends a tool block only on a
-# separator or an error banner, so prose emitted straight after tool output with
-# neither in between is consumed as if it were more tool output. ESC-originated
-# lines and unambiguous diff headers are still dropped; +/- lines are not, since
-# a diff removal and a markdown bullet are indistinguishable and eating the
-# report is the worse error.
 denoise() {
-  awk -v b="$REPORT_BEGIN" -v e="$REPORT_END" -v lenient="$2" '
+  awk -v b="$REPORT_BEGIN" -v e="$REPORT_END" '
     BEGIN { esc = sprintf("%c", 27); csi = esc "\\[[0-9;?]*[a-zA-Z]"; state = "prose"; n = 0 }
     {
       isesc = (substr($0, 1, 1) == esc)
@@ -402,13 +405,12 @@ denoise() {
       t = line
       gsub(/^[ \t]+|[ \t]+$/, "", t)
       if (t == b) state = "prose"
-      if (state == "tool" && !lenient) next
+      if (state == "tool") next
       if (state == "errspill") {
         if (line ~ /^[ \t]*([][{}"]|Error message:)/ || line ~ /^[ \t]*$/) next
         state = "prose"
       }
       if (line ~ /^> [a-zA-Z0-9_.-]+ · /) next   # opencode banner: "> build · <model>"
-      if (lenient && line ~ /^(diff --git |index [0-9a-f]+\.\.|@@ |\(no output\)$)/) next
       buf[++n] = line
     }
     END {
@@ -439,31 +441,26 @@ report_bytes() { LC_ALL=C tr -d '[:space:]' <"$1" | wc -c | tr -d ' '; }
 #   0  fenced report found — this is the good path
 #   1  no fence; a de-noised transcript was written instead (model ignored the
 #      format instruction — still far smaller than the raw capture)
-#   3  the strict pass came up empty and a lenient one recovered the report, so
-#      the tool-output rule had swallowed it; noisier, but a report
-#   2  nothing substantive — the stage really did produce no report
+#   2  nothing substantive — the stage produced no report
 #
-# The 3 and 2 paths keep the transcript, because both are cases where believing
-# the extractor requires being able to check it.
+# There is deliberately no "recover it anyway" pass here. Dropping the tool-output
+# rule does salvage a report the de-noiser swallowed, but it cannot tell that
+# report from tool output, so a model that runs git diff and then stops gets its
+# own diff forwarded as its review and the run is called ok — which is precisely
+# the failure the blank check exists to catch. A fenced report is already immune
+# (the fence outranks the state machine, above); an unfenced one has no anchor to
+# recover from, so it is reported blank and its transcript is kept to be read.
 extract_report() {
-  local in="$1" out="$2" stage="${3:-stage}" rc bytes kept
+  local in="$1" out="$2" stage="${3:-stage}" rc bytes
 
-  denoise "$in" 0 >"$out"
+  denoise "$in" >"$out"
   rc=$?
   bytes="$(report_bytes "$out")"
   [ "$bytes" -ge "$REPORT_MIN_BYTES" ] && return "$rc"
 
-  denoise "$in" 1 >"$out"
-  bytes="$(report_bytes "$out")"
-  if [ "$bytes" -ge "$REPORT_MIN_BYTES" ]; then
-    kept="$(retain_transcript "$in" "$stage")"
-    log "WARN: ${stage}: strict de-noising left nothing; a lenient pass recovered ${bytes} B, so the report was being swallowed. Transcript: ${kept:-<not kept>}"
-    return 3
-  fi
-
   : >"$out"
-  kept="$(retain_transcript "$in" "$stage")"
-  log "WARN: ${stage}: no report could be extracted from $(wc -c <"$in" | tr -d ' ') B of transcript. Transcript: ${kept:-<empty, not kept>}"
+  retain_transcript "$in" "$stage"
+  log "WARN: ${stage}: no report could be extracted from $(wc -c <"$in" | tr -d ' ') B of transcript. Transcript: ${KEPT_PATH:-<empty, not kept>}"
   return 2
 }
 
@@ -473,7 +470,6 @@ stage_note() {
   case "$2" in
   0) status_note "$1" ;;
   1) printf '%s, but the report was not fenced — de-noised transcript used' "$(status_note "$1")" ;;
-  3) printf '%s, report recovered only by a lenient pass — expect tool output mixed in' "$(status_note "$1")" ;;
   *) printf 'NO REPORT PRODUCED (run %s)' "$(status_note "$1")" ;;
   esac
 }
