@@ -34,6 +34,9 @@
 #                                --agent (escape hatch; must be a mode:primary agent)
 #   OPENCODE_REVIEW_FACTCHECK    1 to run the phase-3 fact-check pass, 0 to skip (default 1)
 #   OPENCODE_REVIEW_FACTCHECK_MODEL  fact-check model (default opencode-go/deepseek-v4-pro)
+#   OPENCODE_REVIEW_DEP_DIRS     extra dependency-source dirs the file tools may read,
+#                                colon-separated (GOMODCACHE and the cargo registry are
+#                                detected automatically)
 #   OPENCODE_REVIEW_TIMEOUT      per-model hard timeout in seconds (default 900)
 #   OPENCODE_REVIEW_STAGGER      seconds between the two parallel member launches,
 #                                to dodge opencode's session-init DB lock (default 3)
@@ -287,8 +290,109 @@ $(cat "$RULES_DIR/$doc")
 #                           smuggle chained commands, pipes-to-shell, command
 #                           substitution, or redirection writes. Costs the models
 #                           regex alternation ('a|b') in grep args — acceptable.
+#   external_directory   -> ADDS read access to the dependency caches found by
+#                           dep_dirs (below). No blanket deny is written here:
+#                           OPENCODE_PERMISSION is merged with the saved config,
+#                           not substituted for it, so a "*":"deny" would also
+#                           override opencode's own allows and any the user has
+#                           configured. The built-in default for an unlisted path
+#                           is "ask", which auto-rejects headless — the behaviour
+#                           this block relied on before. So this only widens, and
+#                           only for the paths named.
 # This is defense-in-depth over glob matching, not a hard sandbox.
-PERM='{"edit":"deny","question":"deny","doom_loop":"deny","bash":{"*":"deny","git diff*":"allow","git show*":"allow","git log*":"allow","git status*":"allow","git ls-files*":"allow","git rev-parse*":"allow","git blame*":"allow","git grep*":"allow","cat *":"allow","head *":"allow","tail *":"allow","wc *":"allow","ls":"allow","ls *":"allow","grep *":"allow","rg *":"allow","*;*":"deny","*|*":"deny","*&*":"deny","*>*":"deny","*`*":"deny","*$(*":"deny","*<(*":"deny","*\n*":"deny"}}'
+#
+# Note the bash patterns are path-AGNOSTIC: "head *" matches "head /anywhere". The
+# boundary this block draws is therefore over *commands*, not over paths — reads
+# outside the repo have always been possible by spelling them as a shell command.
+# What external_directory adds is making the file tools agree with that for the
+# dependency caches, instead of the two routes disagreeing about the same file.
+
+# dep_dirs prints the dependency source caches that exist on this machine, one
+# per line. These are the one class of path outside the repo a reviewer genuinely
+# needs: when a diff's assertions encode a dependency's contract, "does this match
+# what the dependency actually does?" is the review question, and it cannot be
+# answered from the diff alone. They are read-only by nature, and they are not the
+# untrusted input — the diff is. `edit` stays denied globally, so this grants
+# reading, never writing.
+#
+# Add more with OPENCODE_REVIEW_DEP_DIRS (colon-separated absolute paths).
+
+# go_env_get <KEY> prints KEY from Go's own env file (what `go env -w` writes).
+# Location is os.UserConfigDir()/go/env; the macOS path is checked first and only
+# one of the two exists on a given machine.
+go_env_get() {
+  local f
+  for f in "$HOME/Library/Application Support/go/env" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/go/env"; do
+    [ -f "$f" ] || continue
+    sed -n "s/^$1=//p" "$f" | tail -1
+    return 0
+  done
+}
+
+# go_mod_cache prints Go's module cache path, mirroring the toolchain's own
+# precedence: GOMODCACHE, else GOPATH/pkg/mod, each falling back to the go env
+# file and finally to the documented default of $HOME/go.
+#
+# Deliberately NOT `go env GOMODCACHE`. That resolves `go` through PATH and runs
+# it, from the root of the repository under review, before any permission set is
+# in effect. The script cannot avoid running PATH-resolved git and opencode the
+# same way, but an optional convenience does not get to widen that surface — and
+# resolving it by hand costs nothing and works with no toolchain installed.
+go_mod_cache() {
+  local v gp
+  v="${GOMODCACHE:-}"
+  [ -n "$v" ] || v="$(go_env_get GOMODCACHE)"
+  if [ -z "$v" ]; then
+    gp="${GOPATH:-}"
+    [ -n "$gp" ] || gp="$(go_env_get GOPATH)"
+    [ -n "$gp" ] || gp="$HOME/go"
+    gp="${gp%%:*}" # GOPATH may be a list; the module cache lives under the first
+    v="$gp/pkg/mod"
+  fi
+  printf '%s' "$v"
+}
+
+dep_dirs() {
+  local d
+  d="$(go_mod_cache)"
+  [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"
+  d="${CARGO_HOME:-$HOME/.cargo}/registry"
+  [ -d "$d" ] && printf '%s\n' "$d"
+  printf '%s' "${OPENCODE_REVIEW_DEP_DIRS:-}" | tr ':' '\n' | while IFS= read -r d; do
+    [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"
+  done
+}
+
+# external_dirs_rules prints the "external_directory" member of the permission
+# object, or nothing when no cache was found. Paths holding a quote or backslash
+# are skipped rather than escaped: they cannot be spelled safely here, and a
+# dependency cache is never going to be at such a path.
+external_dirs_rules() {
+  local d out=""
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    case "$d" in *[\\\"]*) continue ;; esac
+    [ -n "$out" ] && out="${out},"
+    out="${out}\"${d}/**\":\"allow\""
+  done <<EOF
+$(dep_dirs | sort -u)
+EOF
+  [ -n "$out" ] || return 0
+  printf '"external_directory":{%s},' "$out"
+}
+
+EXT_DIR_RULES="$(external_dirs_rules)"
+if [ -n "$EXT_DIR_RULES" ]; then
+  log "deps  : file-tool reads allowed under $(dep_dirs | sort -u | tr '\n' ' ')"
+else
+  log "deps  : no dependency cache found; file tools stay repo-only"
+fi
+
+# The bash map is kept as a single-quoted literal so patterns like "*$(*" are not
+# touched by the shell; only the outer object is assembled.
+PERM_BASH='{"*":"deny","git diff*":"allow","git show*":"allow","git log*":"allow","git status*":"allow","git ls-files*":"allow","git rev-parse*":"allow","git blame*":"allow","git grep*":"allow","cat *":"allow","head *":"allow","tail *":"allow","wc *":"allow","ls":"allow","ls *":"allow","grep *":"allow","rg *":"allow","*;*":"deny","*|*":"deny","*&*":"deny","*>*":"deny","*`*":"deny","*$(*":"deny","*<(*":"deny","*\n*":"deny"}'
+PERM="{\"edit\":\"deny\",\"question\":\"deny\",\"doom_loop\":\"deny\",${EXT_DIR_RULES}\"bash\":${PERM_BASH}}"
 
 swe_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-swe.$$")"
 arch_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-arch.$$")"
