@@ -65,6 +65,27 @@ STAGGER="${OPENCODE_REVIEW_STAGGER:-3}"
 
 log() { printf '[opencode-review] %s\n' "$*" >&2; }
 
+# ---------------------------------------------------------------- report fence
+# Each persona fences its report between these markers and every stage forwards
+# only what is between them (see "report extraction" below).
+#
+# The markers carry a per-run nonce because the fence is allowed to outrank the
+# render state machine, so anything that can emit a marker line controls what is
+# taken as the report. The repository under review can emit one: the personas
+# tell members to read related files, `cat`/`head`/`tail` are permitted and print
+# file content verbatim, and the diff under review is untrusted input. A fixed
+# marker would also break on this repo, whose own prompts/*.md contain the
+# literal token. A nonce the reviewed tree cannot know closes both.
+#
+# prompts/*.md carry the bare token; read_prompt substitutes the nonced form, so
+# the persona files stay readable and there is one source of truth for the value.
+REPORT_TOKEN_BEGIN='<<<REVIEW-REPORT>>>'
+REPORT_TOKEN_END='<<<END-REVIEW-REPORT>>>'
+REPORT_NONCE="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+[ -n "$REPORT_NONCE" ] || REPORT_NONCE="$$$(date +%s)"
+REPORT_BEGIN="<<<REVIEW-REPORT-${REPORT_NONCE}>>>"
+REPORT_END="<<<END-REVIEW-REPORT-${REPORT_NONCE}>>>"
+
 # ----------------------------------------------------------------- pre-flight
 command -v opencode >/dev/null 2>&1 ||
   {
@@ -84,12 +105,13 @@ elif command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_BIN="gtimeout"
 fi
 
-read_prompt() { # $1 file -> persona text (fatal if missing)
+read_prompt() { # $1 file -> persona text, fence markers nonced (fatal if missing)
   [ -f "$1" ] || {
     log "ERROR: prompt file missing: $1"
     exit 1
   }
-  cat "$1"
+  sed -e "s|${REPORT_TOKEN_END}|${REPORT_END}|g" \
+    -e "s|${REPORT_TOKEN_BEGIN}|${REPORT_BEGIN}|g" "$1"
 }
 
 # ---------------------------------------------------------- choose the target
@@ -335,10 +357,8 @@ status_note() {
 # ruleset as JSON. Handing that to the next stage is what stalled the chair: it
 # received 60-78 KB of render noise and had to find the reports inside it.
 #
-# So every persona fences its report between these markers, and each stage passes
-# on only what is between them.
-REPORT_BEGIN='<<<REVIEW-REPORT>>>'
-REPORT_END='<<<END-REVIEW-REPORT>>>'
+# So every persona fences its report (REPORT_BEGIN/REPORT_END, defined up top with
+# the reasoning for the nonce), and each stage passes on only what is between them.
 # Below this many non-whitespace BYTES (CJK runs ~3/char) an "extracted report" is
 # a stray heading or a courtesy line, not a report; the stage is reported as blank.
 REPORT_MIN_BYTES=40

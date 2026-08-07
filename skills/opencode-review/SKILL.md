@@ -95,6 +95,14 @@ told to fence its report between `<<<REVIEW-REPORT>>>` and `<<<END-REVIEW-REPORT
 every stage passes on only what is between them. If a model ignores the fence the script
 falls back to a de-noised transcript (tool blocks and escapes dropped) and says so in the log.
 
+The markers carry a **per-run nonce**: `prompts/*.md` hold the bare token, and `read_prompt`
+rewrites it to `<<<REVIEW-REPORT-<random>>>>` on the way into each message. The fence is
+allowed to outrank the render heuristics, so whatever can emit a marker line controls what is
+taken as the report — and the tree under review can emit one, since members are told to read
+related files and `cat`/`head`/`tail` print content verbatim. A fixed marker would also break
+on this repo, whose own `prompts/*.md` contain the literal token. Edit the personas using the
+bare token; never hardcode a nonced marker.
+
 De-noising reads opencode's render structure, and that structure is not fully reliable: a
 tool block is ended by a separator line or an error banner, and a tool call that renders no
 output block (`Read`) emits no separator — so when it is the last call before the report, the
