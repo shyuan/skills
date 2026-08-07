@@ -273,23 +273,34 @@ arch_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-arch.$$")"
 chair_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-chair.$$")"
 fc_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-fc.$$")"
 single_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-single.$$")"
-trap 'rm -f "$swe_out" "$arch_out" "$chair_out" "$fc_out" "$single_out"' EXIT
+# ..._rep holds the report extracted from the matching ..._out transcript.
+swe_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-swe-rep.$$")"
+arch_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-arch-rep.$$")"
+chair_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-chair-rep.$$")"
+fc_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-fc-rep.$$")"
+single_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-single-rep.$$")"
+trap 'rm -f "$swe_out" "$arch_out" "$chair_out" "$fc_out" "$single_out" \
+  "$swe_rep" "$arch_rep" "$chair_rep" "$fc_rep" "$single_rep"' EXIT
 
 # oc_run <flag> <value> <message> <outfile>
 # Runs one opencode invocation headlessly (flag is --model or --agent), capturing
 # BOTH streams to <outfile> (opencode emits the report on its render stream, not
-# its final stdout). Honors a hard timeout via timeout(1) when present, else a
-# built-in watchdog so a hung run can't block forever. Returns the exit status
-# (124 on timeout).
+# its final stdout). What lands in <outfile> is therefore a transcript — run it
+# through extract_report before showing it to anyone. Honors a hard timeout via
+# timeout(1) when present, else a built-in watchdog so a hung run can't block
+# forever. Returns the exit status (124 on timeout).
+#
+# stdin is /dev/null: with stdin left attached, `opencode run` waits on it and the
+# run hangs until the timeout fires, having produced no output at all.
 oc_run() {
   local flag="$1" val="$2" msg="$3" out="$4" st td pid wpid
   if [ -n "$TIMEOUT_BIN" ]; then
     GIT_PAGER=cat GH_PAGER=cat PAGER=cat OPENCODE_PERMISSION="$PERM" \
-      "$TIMEOUT_BIN" "$TIMEOUT" opencode run --pure "$flag" "$val" "$msg" >"$out" 2>&1
+      "$TIMEOUT_BIN" "$TIMEOUT" opencode run --pure "$flag" "$val" "$msg" </dev/null >"$out" 2>&1
     return $?
   fi
   GIT_PAGER=cat GH_PAGER=cat PAGER=cat OPENCODE_PERMISSION="$PERM" \
-    opencode run --pure "$flag" "$val" "$msg" >"$out" 2>&1 &
+    opencode run --pure "$flag" "$val" "$msg" </dev/null >"$out" 2>&1 &
   pid=$!
   td="$(mktemp 2>/dev/null || echo "/tmp/oc-td.$$")"
   rm -f "$td"
@@ -317,6 +328,96 @@ status_note() {
   esac
 }
 
+# ------------------------------------------------------------ report extraction
+# What oc_run captures is a TRANSCRIPT, not a report: opencode renders tool-call
+# headers, tool output (including an echo of the whole diff, once per member),
+# ANSI escapes, and — on every denied bash call — the entire OPENCODE_PERMISSION
+# ruleset as JSON. Handing that to the next stage is what stalled the chair: it
+# received 60-78 KB of render noise and had to find the reports inside it.
+#
+# So every persona fences its report between these markers, and each stage passes
+# on only what is between them.
+REPORT_BEGIN='<<<REVIEW-REPORT>>>'
+REPORT_END='<<<END-REVIEW-REPORT>>>'
+# Below this many non-whitespace BYTES (CJK runs ~3/char) an "extracted report" is
+# a stray heading or a courtesy line, not a report; the stage is reported as blank.
+REPORT_MIN_BYTES=40
+
+# extract_report <transcript> <outfile>
+# Writes the stage's report to <outfile>. Exit status:
+#   0  fenced report found — this is the good path
+#   1  no fence; a de-noised transcript was written instead (model ignored the
+#      format instruction — still far smaller than the raw capture)
+#   2  nothing substantive — the stage produced no report
+#
+# De-noising uses opencode's own render structure: a line starting with ESC is
+# either a bare separator, a tool header, or an error banner; the plain lines
+# after a tool header are that tool's output. A separator ends the tool block.
+#
+# An error banner also ends it, but what follows the banner differs by error:
+#   - a denied bash call puts its whole ruleset on the banner line, and the
+#     model's prose resumes on the next line with no separator of its own;
+#   - a malformed provider response (e.g. a payload carrying neither `choices`
+#     nor `error`) spills a multi-line Zod validation dump below the banner.
+# So after a banner we skip continuation lines that look like structured-error
+# spill — brackets, quoted keys, "Error message:" — and treat the first line that
+# does not as the model's prose.
+extract_report() {
+  local in="$1" out="$2" st bytes
+  awk -v b="$REPORT_BEGIN" -v e="$REPORT_END" '
+    BEGIN { esc = sprintf("%c", 27); csi = esc "\\[[0-9;?]*[a-zA-Z]"; state = "prose"; n = 0 }
+    {
+      isesc = (substr($0, 1, 1) == esc)
+      line = $0
+      gsub(csi, "", line)
+      sub("\r$", "", line)
+      if (isesc) {
+        if (line == "") { state = "prose"; next }
+        if (line ~ /^Error: /) { state = "errspill"; next }
+        state = "tool"; next
+      }
+      if (state == "tool") next
+      if (state == "errspill") {
+        if (line ~ /^[ \t]*([][{}"]|Error message:)/ || line ~ /^[ \t]*$/) next
+        state = "prose"
+      }
+      if (line ~ /^> [a-zA-Z0-9_.-]+ · /) next   # opencode banner: "> build · <model>"
+      buf[++n] = line
+    }
+    END {
+      nb = 0
+      for (i = 1; i <= n; i++) { t = buf[i]; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t == b) nb = i }
+      if (nb > 0) {
+        ne = n + 1
+        for (i = nb + 1; i <= n; i++) { t = buf[i]; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t == e) { ne = i; break } }
+        lo = nb + 1; hi = ne - 1; rc = 0
+      } else {
+        lo = 1; hi = n; rc = 1
+      }
+      while (lo <= hi && buf[lo] ~ /^[ \t]*$/) lo++          # trim blank edges
+      while (hi >= lo && buf[hi] ~ /^[ \t]*$/) hi--
+      for (i = lo; i <= hi; i++) print buf[i]
+      exit rc
+    }
+  ' "$in" >"$out"
+  st=$?
+  # LC_ALL=C: reports are largely CJK and BSD tr is not multibyte-safe; a byte
+  # count is all this needs, and bytewise deletion cannot choke on a UTF-8 lead.
+  bytes="$(LC_ALL=C tr -d '[:space:]' <"$out" | wc -c | tr -d ' ')"
+  [ "$bytes" -lt "$REPORT_MIN_BYTES" ] && return 2
+  return "$st"
+}
+
+# stage_note <run-exit-status> <extract-status> -> the label shown in the log and
+# handed to the chair, so "exited 0 having written nothing" can no longer read ok.
+stage_note() {
+  case "$2" in
+  0) status_note "$1" ;;
+  1) printf '%s, but the report was not fenced — de-noised transcript used' "$(status_note "$1")" ;;
+  *) printf 'NO REPORT PRODUCED (run %s)' "$(status_note "$1")" ;;
+  esac
+}
+
 # member message = persona + the review-target instruction + file-type checklist
 member_msg() { printf '%s\n\n--- Review target ---\n%s\n%s\n' "$1" "$MSG" "$RULES_BLOCK"; }
 
@@ -337,9 +438,14 @@ if [ -n "$SINGLE_AGENT" ]; then
   echo "===== OPENCODE REVIEW (agent ${SINGLE_AGENT}) — ${SCOPE} ====="
   oc_run --agent "$SINGLE_AGENT" "$MSG" "$single_out"
   st=$?
-  cat "$single_out"
+  # A pre-configured agent has its own prompt and cannot be told to fence, so a
+  # missing fence here is expected; the de-noising still applies.
+  extract_report "$single_out" "$single_rep"
+  ex=$?
+  cat "$single_rep"
   echo "===== END OF REVIEW ====="
-  log "single-agent review: $(status_note "$st")"
+  log "single-agent review: $(stage_note "$st" "$ex")"
+  [ "$st" -eq 0 ] && [ "$ex" -eq 2 ] && st=1
   exit "$st"
 fi
 
@@ -350,9 +456,12 @@ if [ -n "$SINGLE_MODEL" ]; then
   echo "===== OPENCODE REVIEW (model ${SINGLE_MODEL}) — ${SCOPE} ====="
   oc_run --model "$SINGLE_MODEL" "$(member_msg "$(read_prompt "$PROMPTS_DIR/swe.md")")" "$single_out"
   st=$?
-  cat "$single_out"
+  extract_report "$single_out" "$single_rep"
+  ex=$?
+  cat "$single_rep"
   echo "===== END OF REVIEW ====="
-  log "single-model review: $(status_note "$st")"
+  log "single-model review: $(stage_note "$st" "$ex")"
+  [ "$st" -eq 0 ] && [ "$ex" -eq 2 ] && st=1
   exit "$st"
 fi
 
@@ -379,54 +488,71 @@ wait "$swe_job"
 swe_st=$?
 wait "$arch_job"
 arch_st=$?
-log "phase 1 done: swe=$(status_note "$swe_st"), architect=$(status_note "$arch_st")"
+extract_report "$swe_out" "$swe_rep"
+swe_ex=$?
+extract_report "$arch_out" "$arch_rep"
+arch_ex=$?
+log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex"), architect=$(stage_note "$arch_st" "$arch_ex")"
 
-# Phase 2 — the chair dedupes/verifies both reports against the same target.
+# Phase 2 — the chair dedupes/verifies both reports against the same target. It
+# receives the extracted reports, which is what prompts/chair.md says it will get;
+# a member that wrote nothing is announced as such, so the chair's own
+# "note which member is absent" rule can actually fire.
 log "phase 2: chair (synthesis)"
 chair_msg="$(printf '%s\n\n===== SWE report (correctness/bugs/security) [%s] =====\n%s\n\n===== Architect report (design/architecture) [%s] =====\n%s\n\n===== review target =====\n%s\n' \
   "$CHAIR_PERSONA" \
-  "$(status_note "$swe_st")" "$(cat "$swe_out")" \
-  "$(status_note "$arch_st")" "$(cat "$arch_out")" \
+  "$(stage_note "$swe_st" "$swe_ex")" "$(cat "$swe_rep")" \
+  "$(stage_note "$arch_st" "$arch_ex")" "$(cat "$arch_rep")" \
   "$MSG")"
+log "phase 2: chair prompt is $(printf '%s' "$chair_msg" | wc -c | tr -d ' ') B (swe report $(wc -c <"$swe_rep" | tr -d ' ') B of $(wc -c <"$swe_out" | tr -d ' ') B captured, architect $(wc -c <"$arch_rep" | tr -d ' ') B of $(wc -c <"$arch_out" | tr -d ' ') B)"
 oc_run --model "$CHAIR_MODEL" "$chair_msg" "$chair_out"
 chair_st=$?
+extract_report "$chair_out" "$chair_rep"
+chair_ex=$?
 
 # Phase 3 (optional) — fact-check the chair's report against the diff only,
 # pruning findings the diff can directly falsify. On any failure the chair's
 # report is emitted unchanged, so this phase can only ever reduce false positives.
 fc_st=0
+fc_ex=0
 fc_applied=0
-if [ "$chair_st" -eq 0 ] && [ -s "$chair_out" ] && [ "$FACTCHECK_ENABLED" != "0" ]; then
+if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "0" ]; then
   log "phase 3: fact-check (${FACTCHECK_MODEL})"
   FACTCHECK_PERSONA="$(read_prompt "$PROMPTS_DIR/factcheck.md")"
   fc_msg="$(printf '%s\n\n===== Chair report to fact-check =====\n%s\n\n===== review target =====\n%s\n' \
-    "$FACTCHECK_PERSONA" "$(cat "$chair_out")" "$MSG")"
+    "$FACTCHECK_PERSONA" "$(cat "$chair_rep")" "$MSG")"
   oc_run --model "$FACTCHECK_MODEL" "$fc_msg" "$fc_out"
   fc_st=$?
-  if [ "$fc_st" -eq 0 ] && [ -s "$fc_out" ]; then
+  extract_report "$fc_out" "$fc_rep"
+  fc_ex=$?
+  if [ "$fc_st" -eq 0 ] && [ "$fc_ex" -ne 2 ]; then
     fc_applied=1
     log "phase 3 done: fact-check applied"
   else
-    log "WARN: fact-check $(status_note "$fc_st"); emitting chair report unchanged."
+    log "WARN: fact-check $(stage_note "$fc_st" "$fc_ex"); emitting chair report unchanged."
   fi
 fi
 
 if [ "$fc_applied" -eq 1 ]; then
-  cat "$fc_out"
-elif [ "$chair_st" -eq 0 ] && [ -s "$chair_out" ]; then
-  cat "$chair_out"
+  cat "$fc_rep"
+elif [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ]; then
+  cat "$chair_rep"
 else
-  log "WARN: chair $(status_note "$chair_st"); falling back to the raw member reports."
-  printf '## SWE (correctness) [%s]\n\n' "$(status_note "$swe_st")"
-  cat "$swe_out"
-  printf '\n## Architect (design) [%s]\n\n' "$(status_note "$arch_st")"
-  cat "$arch_out"
+  log "WARN: chair $(stage_note "$chair_st" "$chair_ex"); falling back to the member reports."
+  printf '## SWE (correctness) [%s]\n\n' "$(stage_note "$swe_st" "$swe_ex")"
+  cat "$swe_rep"
+  printf '\n## Architect (design) [%s]\n\n' "$(stage_note "$arch_st" "$arch_ex")"
+  cat "$arch_rep"
 fi
 echo "===== END OF REVIEW ====="
 
+# A stage that exited 0 having written no report is a failed stage: the caller
+# must never be told "ok" about a run that produced nothing.
 if [ "$chair_st" -ne 0 ]; then
   status="$chair_st"
-elif [ "$swe_st" -ne 0 ] || [ "$arch_st" -ne 0 ]; then
+elif [ "$chair_ex" -eq 2 ]; then
+  status=1
+elif [ "$swe_st" -ne 0 ] || [ "$arch_st" -ne 0 ] || [ "$swe_ex" -eq 2 ] || [ "$arch_ex" -eq 2 ]; then
   status=1
 else
   status=0
@@ -435,6 +561,6 @@ fi
 if [ "$status" -eq 0 ]; then
   log "committee review complete."
 else
-  log "committee review finished with issues (chair=$(status_note "$chair_st"), swe=$(status_note "$swe_st"), architect=$(status_note "$arch_st"))."
+  log "committee review finished with issues (chair=$(stage_note "$chair_st" "$chair_ex"), swe=$(stage_note "$swe_st" "$swe_ex"), architect=$(stage_note "$arch_st" "$arch_ex"))."
 fi
 exit "$status"

@@ -81,11 +81,25 @@ Optional environment overrides:
   (default `3`), to avoid opencode's session-init "database is locked" startup race.
 
 The script captures each model's full output (both streams — the report is emitted on
-OpenCode's render stream, not its final stdout message) and prints the chair's consolidated
-report to **stdout** between the `===== … REVIEW … =====` and `===== END OF REVIEW =====`
-markers. Only the script's own progress/error lines (prefixed `[opencode-review]`) go to
-**stderr**. If the chair fails or times out, the two raw member reports are printed as a
-fallback so you still have something actionable.
+OpenCode's render stream, not its final stdout message), **extracts the report from that
+capture**, and prints the chair's consolidated report to **stdout** between the
+`===== … REVIEW … =====` and `===== END OF REVIEW =====` markers. Only the script's own
+progress/error lines (prefixed `[opencode-review]`) go to **stderr**. If the chair fails or
+times out, the two member reports are printed as a fallback so you still have something
+actionable.
+
+Extraction matters because the capture is a *transcript*, not a report: it also holds
+tool-call headers, tool output (each member echoes the whole diff), ANSI escapes, and — on
+every denied bash call — the entire `OPENCODE_PERMISSION` ruleset as JSON. Feeding that to
+the chair is what used to make it stall. So each persona is told to fence its report between
+`<<<REVIEW-REPORT>>>` and `<<<END-REVIEW-REPORT>>>`, and every stage passes on only what is
+between them. If a model ignores the fence the script falls back to a de-noised transcript
+(tool blocks and escapes dropped) and says so in the log.
+
+A stage that exits 0 having written **no** report is reported as
+`NO REPORT PRODUCED (run ok)`, not `ok`, in both the log and the message handed to the
+chair — so `prompts/chair.md`'s "note which member is absent" rule can fire, and the run's
+exit status is non-zero. A run that yielded nothing can no longer look successful.
 
 ## What to do with the report
 
