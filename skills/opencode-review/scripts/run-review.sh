@@ -316,12 +316,47 @@ $(cat "$RULES_DIR/$doc")
 # reading, never writing.
 #
 # Add more with OPENCODE_REVIEW_DEP_DIRS (colon-separated absolute paths).
+
+# go_env_get <KEY> prints KEY from Go's own env file (what `go env -w` writes).
+# Location is os.UserConfigDir()/go/env; the macOS path is checked first and only
+# one of the two exists on a given machine.
+go_env_get() {
+  local f
+  for f in "$HOME/Library/Application Support/go/env" \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/go/env"; do
+    [ -f "$f" ] || continue
+    sed -n "s/^$1=//p" "$f" | tail -1
+    return 0
+  done
+}
+
+# go_mod_cache prints Go's module cache path, mirroring the toolchain's own
+# precedence: GOMODCACHE, else GOPATH/pkg/mod, each falling back to the go env
+# file and finally to the documented default of $HOME/go.
+#
+# Deliberately NOT `go env GOMODCACHE`. That resolves `go` through PATH and runs
+# it, from the root of the repository under review, before any permission set is
+# in effect. The script cannot avoid running PATH-resolved git and opencode the
+# same way, but an optional convenience does not get to widen that surface — and
+# resolving it by hand costs nothing and works with no toolchain installed.
+go_mod_cache() {
+  local v gp
+  v="${GOMODCACHE:-}"
+  [ -n "$v" ] || v="$(go_env_get GOMODCACHE)"
+  if [ -z "$v" ]; then
+    gp="${GOPATH:-}"
+    [ -n "$gp" ] || gp="$(go_env_get GOPATH)"
+    [ -n "$gp" ] || gp="$HOME/go"
+    gp="${gp%%:*}" # GOPATH may be a list; the module cache lives under the first
+    v="$gp/pkg/mod"
+  fi
+  printf '%s' "$v"
+}
+
 dep_dirs() {
   local d
-  if command -v go >/dev/null 2>&1; then
-    d="$(go env GOMODCACHE 2>/dev/null)"
-    [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"
-  fi
+  d="$(go_mod_cache)"
+  [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"
   d="${CARGO_HOME:-$HOME/.cargo}/registry"
   [ -d "$d" ] && printf '%s\n' "$d"
   printf '%s' "${OPENCODE_REVIEW_DEP_DIRS:-}" | tr ':' '\n' | while IFS= read -r d; do

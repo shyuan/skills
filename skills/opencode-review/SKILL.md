@@ -173,11 +173,14 @@ These are already true in the user's environment; only check them if the run fai
   separately by `external_directory`, whose default for an unlisted path is "ask", i.e. an
   auto-reject headless. The two routes therefore used to disagree about the same file, which
   cost members turns on rejected `Read` calls (#24). The script now allows file-tool reads
-  under the dependency caches it finds (`go env GOMODCACHE`, `$CARGO_HOME/registry`, plus
+  under the dependency caches it finds (Go's module cache, `$CARGO_HOME/registry`, plus
   anything in `OPENCODE_REVIEW_DEP_DIRS`) so the ergonomic route works where it matters: for a
   diff whose assertions encode a dependency's contract, that source *is* the review question.
   Only allows are written, never a blanket deny — a `"*":"deny"` here would also override
-  opencode's own entries and any the user has configured, since the two are merged.
+  opencode's own entries and any the user has configured, since the two are merged. The Go
+  path is resolved from `GOMODCACHE`/`GOPATH`/the `go env` file rather than by running
+  `go env`: the script has to run PATH-resolved `git` and `opencode` from the repo root
+  before any permission set exists, but an optional convenience should not widen that.
 - **The personas state these boundaries up front** rather than letting models find them by
   hitting them: no test/build execution (that would run code from the untrusted diff), what is
   readable and how, no retrying a rejected call, and — because two members once ended a run on
