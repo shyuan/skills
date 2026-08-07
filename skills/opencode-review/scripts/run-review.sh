@@ -343,12 +343,24 @@ REPORT_END='<<<END-REVIEW-REPORT>>>'
 # a stray heading or a courtesy line, not a report; the stage is reported as blank.
 REPORT_MIN_BYTES=40
 
-# extract_report <transcript> <outfile>
-# Writes the stage's report to <outfile>. Exit status:
-#   0  fenced report found — this is the good path
-#   1  no fence; a de-noised transcript was written instead (model ignored the
-#      format instruction — still far smaller than the raw capture)
-#   2  nothing substantive — the stage produced no report
+# Where a transcript is kept when its report could not be extracted cleanly, so
+# the next occurrence can be diagnosed instead of guessed at. Every other copy is
+# a mktemp file removed on exit, and a blank stage prints nothing — without this
+# there is no way to tell "the model said nothing" from "the de-noiser ate it".
+KEEP_DIR="${TMPDIR:-/tmp}"
+
+# retain_transcript <transcript> <stage-label> -> prints the kept path, if any.
+# Skips an empty transcript: there is nothing in it to diagnose.
+retain_transcript() {
+  local kept
+  [ -s "$1" ] || return 0
+  kept="${KEEP_DIR%/}/opencode-review-$2-$$.log"
+  cp "$1" "$kept" 2>/dev/null && printf '%s' "$kept"
+}
+
+# denoise <transcript> <lenient 0|1>
+# Prints the report on stdout; exits 0 if it came from between the fences, 1 if
+# the fences were absent and the de-noised transcript was used instead.
 #
 # De-noising uses opencode's own render structure: a line starting with ESC is
 # either a bare separator, a tool header, or an error banner; the plain lines
@@ -362,9 +374,16 @@ REPORT_MIN_BYTES=40
 # So after a banner we skip continuation lines that look like structured-error
 # spill — brackets, quoted keys, "Error message:" — and treat the first line that
 # does not as the model's prose.
-extract_report() {
-  local in="$1" out="$2" st bytes
-  awk -v b="$REPORT_BEGIN" -v e="$REPORT_END" '
+#
+# lenient=1 drops the tool-output rule and keeps every plain line, because that
+# rule is the one that can swallow a whole report: it ends a tool block only on a
+# separator or an error banner, so prose emitted straight after tool output with
+# neither in between is consumed as if it were more tool output. ESC-originated
+# lines and unambiguous diff headers are still dropped; +/- lines are not, since
+# a diff removal and a markdown bullet are indistinguishable and eating the
+# report is the worse error.
+denoise() {
+  awk -v b="$REPORT_BEGIN" -v e="$REPORT_END" -v lenient="$2" '
     BEGIN { esc = sprintf("%c", 27); csi = esc "\\[[0-9;?]*[a-zA-Z]"; state = "prose"; n = 0 }
     {
       isesc = (substr($0, 1, 1) == esc)
@@ -376,12 +395,20 @@ extract_report() {
         if (line ~ /^Error: /) { state = "errspill"; next }
         state = "tool"; next
       }
-      if (state == "tool") next
+      # The fence is unambiguous, so it outranks the state machine. This matters:
+      # a tool call that renders no output block (Read) is not followed by a
+      # separator, so when it is the last call the report starts on the very next
+      # line and would otherwise be swallowed as more output from that tool.
+      t = line
+      gsub(/^[ \t]+|[ \t]+$/, "", t)
+      if (t == b) state = "prose"
+      if (state == "tool" && !lenient) next
       if (state == "errspill") {
         if (line ~ /^[ \t]*([][{}"]|Error message:)/ || line ~ /^[ \t]*$/) next
         state = "prose"
       }
       if (line ~ /^> [a-zA-Z0-9_.-]+ · /) next   # opencode banner: "> build · <model>"
+      if (lenient && line ~ /^(diff --git |index [0-9a-f]+\.\.|@@ |\(no output\)$)/) next
       buf[++n] = line
     }
     END {
@@ -399,13 +426,45 @@ extract_report() {
       for (i = lo; i <= hi; i++) print buf[i]
       exit rc
     }
-  ' "$in" >"$out"
-  st=$?
-  # LC_ALL=C: reports are largely CJK and BSD tr is not multibyte-safe; a byte
-  # count is all this needs, and bytewise deletion cannot choke on a UTF-8 lead.
-  bytes="$(LC_ALL=C tr -d '[:space:]' <"$out" | wc -c | tr -d ' ')"
-  [ "$bytes" -lt "$REPORT_MIN_BYTES" ] && return 2
-  return "$st"
+  ' "$1"
+}
+
+# report_bytes <file> -> non-whitespace byte count.
+# LC_ALL=C: reports are largely CJK and BSD tr is not multibyte-safe; a byte
+# count is all this needs, and bytewise deletion cannot choke on a UTF-8 lead.
+report_bytes() { LC_ALL=C tr -d '[:space:]' <"$1" | wc -c | tr -d ' '; }
+
+# extract_report <transcript> <outfile> [stage-label]
+# Writes the stage's report to <outfile>. Exit status:
+#   0  fenced report found — this is the good path
+#   1  no fence; a de-noised transcript was written instead (model ignored the
+#      format instruction — still far smaller than the raw capture)
+#   3  the strict pass came up empty and a lenient one recovered the report, so
+#      the tool-output rule had swallowed it; noisier, but a report
+#   2  nothing substantive — the stage really did produce no report
+#
+# The 3 and 2 paths keep the transcript, because both are cases where believing
+# the extractor requires being able to check it.
+extract_report() {
+  local in="$1" out="$2" stage="${3:-stage}" rc bytes kept
+
+  denoise "$in" 0 >"$out"
+  rc=$?
+  bytes="$(report_bytes "$out")"
+  [ "$bytes" -ge "$REPORT_MIN_BYTES" ] && return "$rc"
+
+  denoise "$in" 1 >"$out"
+  bytes="$(report_bytes "$out")"
+  if [ "$bytes" -ge "$REPORT_MIN_BYTES" ]; then
+    kept="$(retain_transcript "$in" "$stage")"
+    log "WARN: ${stage}: strict de-noising left nothing; a lenient pass recovered ${bytes} B, so the report was being swallowed. Transcript: ${kept:-<not kept>}"
+    return 3
+  fi
+
+  : >"$out"
+  kept="$(retain_transcript "$in" "$stage")"
+  log "WARN: ${stage}: no report could be extracted from $(wc -c <"$in" | tr -d ' ') B of transcript. Transcript: ${kept:-<empty, not kept>}"
+  return 2
 }
 
 # stage_note <run-exit-status> <extract-status> -> the label shown in the log and
@@ -414,6 +473,7 @@ stage_note() {
   case "$2" in
   0) status_note "$1" ;;
   1) printf '%s, but the report was not fenced — de-noised transcript used' "$(status_note "$1")" ;;
+  3) printf '%s, report recovered only by a lenient pass — expect tool output mixed in' "$(status_note "$1")" ;;
   *) printf 'NO REPORT PRODUCED (run %s)' "$(status_note "$1")" ;;
   esac
 }
@@ -440,7 +500,7 @@ if [ -n "$SINGLE_AGENT" ]; then
   st=$?
   # A pre-configured agent has its own prompt and cannot be told to fence, so a
   # missing fence here is expected; the de-noising still applies.
-  extract_report "$single_out" "$single_rep"
+  extract_report "$single_out" "$single_rep" "single-agent"
   ex=$?
   cat "$single_rep"
   echo "===== END OF REVIEW ====="
@@ -456,7 +516,7 @@ if [ -n "$SINGLE_MODEL" ]; then
   echo "===== OPENCODE REVIEW (model ${SINGLE_MODEL}) — ${SCOPE} ====="
   oc_run --model "$SINGLE_MODEL" "$(member_msg "$(read_prompt "$PROMPTS_DIR/swe.md")")" "$single_out"
   st=$?
-  extract_report "$single_out" "$single_rep"
+  extract_report "$single_out" "$single_rep" "single-model"
   ex=$?
   cat "$single_rep"
   echo "===== END OF REVIEW ====="
@@ -488,9 +548,9 @@ wait "$swe_job"
 swe_st=$?
 wait "$arch_job"
 arch_st=$?
-extract_report "$swe_out" "$swe_rep"
+extract_report "$swe_out" "$swe_rep" "swe"
 swe_ex=$?
-extract_report "$arch_out" "$arch_rep"
+extract_report "$arch_out" "$arch_rep" "architect"
 arch_ex=$?
 log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex"), architect=$(stage_note "$arch_st" "$arch_ex")"
 
@@ -507,7 +567,7 @@ chair_msg="$(printf '%s\n\n===== SWE report (correctness/bugs/security) [%s] ===
 log "phase 2: chair prompt is $(printf '%s' "$chair_msg" | wc -c | tr -d ' ') B (swe report $(wc -c <"$swe_rep" | tr -d ' ') B of $(wc -c <"$swe_out" | tr -d ' ') B captured, architect $(wc -c <"$arch_rep" | tr -d ' ') B of $(wc -c <"$arch_out" | tr -d ' ') B)"
 oc_run --model "$CHAIR_MODEL" "$chair_msg" "$chair_out"
 chair_st=$?
-extract_report "$chair_out" "$chair_rep"
+extract_report "$chair_out" "$chair_rep" "chair"
 chair_ex=$?
 
 # Phase 3 (optional) — fact-check the chair's report against the diff only,
@@ -523,7 +583,7 @@ if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "
     "$FACTCHECK_PERSONA" "$(cat "$chair_rep")" "$MSG")"
   oc_run --model "$FACTCHECK_MODEL" "$fc_msg" "$fc_out"
   fc_st=$?
-  extract_report "$fc_out" "$fc_rep"
+  extract_report "$fc_out" "$fc_rep" "factcheck"
   fc_ex=$?
   if [ "$fc_st" -eq 0 ] && [ "$fc_ex" -ne 2 ]; then
     fc_applied=1

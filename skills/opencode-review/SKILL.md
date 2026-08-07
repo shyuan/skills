@@ -90,16 +90,33 @@ actionable.
 
 Extraction matters because the capture is a *transcript*, not a report: it also holds
 tool-call headers, tool output (each member echoes the whole diff), ANSI escapes, and — on
-every denied bash call — the entire `OPENCODE_PERMISSION` ruleset as JSON. Feeding that to
-the chair is what used to make it stall. So each persona is told to fence its report between
-`<<<REVIEW-REPORT>>>` and `<<<END-REVIEW-REPORT>>>`, and every stage passes on only what is
-between them. If a model ignores the fence the script falls back to a de-noised transcript
-(tool blocks and escapes dropped) and says so in the log.
+every denied bash call — the entire `OPENCODE_PERMISSION` ruleset as JSON. So each persona is
+told to fence its report between `<<<REVIEW-REPORT>>>` and `<<<END-REVIEW-REPORT>>>`, and
+every stage passes on only what is between them. If a model ignores the fence the script
+falls back to a de-noised transcript (tool blocks and escapes dropped) and says so in the log.
+
+De-noising reads opencode's render structure, and that structure is not fully reliable: a
+tool block is ended by a separator line or an error banner, and a tool call that renders no
+output block (`Read`) emits no separator — so when it is the last call before the report, the
+report begins on the very next line. The fence therefore outranks the state machine: a
+`<<<REVIEW-REPORT>>>` line ends a tool block wherever it appears.
+
+That only rescues a *fenced* report. When the strict pass still comes up empty the script
+retries with the tool-output rule disabled and uses whatever that recovers — noisier, but a
+real report beats a false blank. The log says `report recovered only by a lenient pass —
+expect tool output mixed in` whenever this happens.
 
 A stage that exits 0 having written **no** report is reported as
 `NO REPORT PRODUCED (run ok)`, not `ok`, in both the log and the message handed to the
 chair — so `prompts/chair.md`'s "note which member is absent" rule can fire, and the run's
 exit status is non-zero. A run that yielded nothing can no longer look successful.
+
+Whenever a report cannot be extracted cleanly — a blank stage, or one that needed the lenient
+pass — that stage's raw transcript is copied to `$TMPDIR/opencode-review-<stage>-<pid>.log`
+and the path is logged. Everything else the script writes is a temp file removed on exit, and
+a blank stage prints nothing, so without this copy there is no way to tell a model that said
+nothing from a de-noiser that ate the report. If a run reports a blank stage, read that file
+before concluding the model was silent.
 
 ## What to do with the report
 
