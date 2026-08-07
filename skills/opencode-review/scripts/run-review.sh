@@ -65,6 +65,27 @@ STAGGER="${OPENCODE_REVIEW_STAGGER:-3}"
 
 log() { printf '[opencode-review] %s\n' "$*" >&2; }
 
+# ---------------------------------------------------------------- report fence
+# Each persona fences its report between these markers and every stage forwards
+# only what is between them (see "report extraction" below).
+#
+# The markers carry a per-run nonce because the fence is allowed to outrank the
+# render state machine, so anything that can emit a marker line controls what is
+# taken as the report. The repository under review can emit one: the personas
+# tell members to read related files, `cat`/`head`/`tail` are permitted and print
+# file content verbatim, and the diff under review is untrusted input. A fixed
+# marker would also break on this repo, whose own prompts/*.md contain the
+# literal token. A nonce the reviewed tree cannot know closes both.
+#
+# prompts/*.md carry the bare token; read_prompt substitutes the nonced form, so
+# the persona files stay readable and there is one source of truth for the value.
+REPORT_TOKEN_BEGIN='<<<REVIEW-REPORT>>>'
+REPORT_TOKEN_END='<<<END-REVIEW-REPORT>>>'
+REPORT_NONCE="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+[ -n "$REPORT_NONCE" ] || REPORT_NONCE="$$$(date +%s)"
+REPORT_BEGIN="<<<REVIEW-REPORT-${REPORT_NONCE}>>>"
+REPORT_END="<<<END-REVIEW-REPORT-${REPORT_NONCE}>>>"
+
 # ----------------------------------------------------------------- pre-flight
 command -v opencode >/dev/null 2>&1 ||
   {
@@ -84,12 +105,13 @@ elif command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_BIN="gtimeout"
 fi
 
-read_prompt() { # $1 file -> persona text (fatal if missing)
+read_prompt() { # $1 file -> persona text, fence markers nonced (fatal if missing)
   [ -f "$1" ] || {
     log "ERROR: prompt file missing: $1"
     exit 1
   }
-  cat "$1"
+  sed -e "s|${REPORT_TOKEN_END}|${REPORT_END}|g" \
+    -e "s|${REPORT_TOKEN_BEGIN}|${REPORT_BEGIN}|g" "$1"
 }
 
 # ---------------------------------------------------------- choose the target
@@ -335,20 +357,41 @@ status_note() {
 # ruleset as JSON. Handing that to the next stage is what stalled the chair: it
 # received 60-78 KB of render noise and had to find the reports inside it.
 #
-# So every persona fences its report between these markers, and each stage passes
-# on only what is between them.
-REPORT_BEGIN='<<<REVIEW-REPORT>>>'
-REPORT_END='<<<END-REVIEW-REPORT>>>'
+# So every persona fences its report (REPORT_BEGIN/REPORT_END, defined up top with
+# the reasoning for the nonce), and each stage passes on only what is between them.
 # Below this many non-whitespace BYTES (CJK runs ~3/char) an "extracted report" is
 # a stray heading or a courtesy line, not a report; the stage is reported as blank.
 REPORT_MIN_BYTES=40
 
-# extract_report <transcript> <outfile>
-# Writes the stage's report to <outfile>. Exit status:
-#   0  fenced report found — this is the good path
-#   1  no fence; a de-noised transcript was written instead (model ignored the
-#      format instruction — still far smaller than the raw capture)
-#   2  nothing substantive — the stage produced no report
+# Where a transcript is kept when no report could be extracted from it, so the
+# next occurrence can be diagnosed instead of guessed at. Every other copy is a
+# mktemp file removed on exit, and a blank stage prints nothing — without this
+# there is no way to tell "the model said nothing" from "the de-noiser ate it".
+#
+# The directory is created by mktemp -d on first use: atomically, mode 700, under
+# an unpredictable name. A fixed name under a shared /tmp would let a local user
+# pre-place a path there — clobbering the evidence, or, since cp follows a
+# destination symlink, diverting a transcript that contains the diff under review.
+KEEP_DIR=""
+
+# retain_transcript <transcript> <stage-label> -> sets KEPT_PATH ("" if not kept).
+# Skips an empty transcript: there is nothing in it to diagnose. Assigns rather
+# than prints so KEEP_DIR survives — a command substitution would subshell it
+# away and every stage would make its own directory.
+KEPT_PATH=""
+retain_transcript() {
+  KEPT_PATH=""
+  [ -s "$1" ] || return 0
+  if [ -z "$KEEP_DIR" ]; then
+    KEEP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/opencode-review-XXXXXXXX" 2>/dev/null)" || return 0
+    [ -n "$KEEP_DIR" ] || return 0
+  fi
+  cp "$1" "$KEEP_DIR/$2.log" 2>/dev/null && KEPT_PATH="$KEEP_DIR/$2.log"
+}
+
+# denoise <transcript>
+# Prints the report on stdout; exits 0 if it came from between the fences, 1 if
+# the fences were absent and the de-noised transcript was used instead.
 #
 # De-noising uses opencode's own render structure: a line starting with ESC is
 # either a bare separator, a tool header, or an error banner; the plain lines
@@ -362,8 +405,7 @@ REPORT_MIN_BYTES=40
 # So after a banner we skip continuation lines that look like structured-error
 # spill — brackets, quoted keys, "Error message:" — and treat the first line that
 # does not as the model's prose.
-extract_report() {
-  local in="$1" out="$2" st bytes
+denoise() {
   awk -v b="$REPORT_BEGIN" -v e="$REPORT_END" '
     BEGIN { esc = sprintf("%c", 27); csi = esc "\\[[0-9;?]*[a-zA-Z]"; state = "prose"; n = 0 }
     {
@@ -376,6 +418,13 @@ extract_report() {
         if (line ~ /^Error: /) { state = "errspill"; next }
         state = "tool"; next
       }
+      # The fence is unambiguous, so it outranks the state machine. This matters:
+      # a tool call that renders no output block (Read) is not followed by a
+      # separator, so when it is the last call the report starts on the very next
+      # line and would otherwise be swallowed as more output from that tool.
+      t = line
+      gsub(/^[ \t]+|[ \t]+$/, "", t)
+      if (t == b) state = "prose"
       if (state == "tool") next
       if (state == "errspill") {
         if (line ~ /^[ \t]*([][{}"]|Error message:)/ || line ~ /^[ \t]*$/) next
@@ -399,13 +448,40 @@ extract_report() {
       for (i = lo; i <= hi; i++) print buf[i]
       exit rc
     }
-  ' "$in" >"$out"
-  st=$?
-  # LC_ALL=C: reports are largely CJK and BSD tr is not multibyte-safe; a byte
-  # count is all this needs, and bytewise deletion cannot choke on a UTF-8 lead.
-  bytes="$(LC_ALL=C tr -d '[:space:]' <"$out" | wc -c | tr -d ' ')"
-  [ "$bytes" -lt "$REPORT_MIN_BYTES" ] && return 2
-  return "$st"
+  ' "$1"
+}
+
+# report_bytes <file> -> non-whitespace byte count.
+# LC_ALL=C: reports are largely CJK and BSD tr is not multibyte-safe; a byte
+# count is all this needs, and bytewise deletion cannot choke on a UTF-8 lead.
+report_bytes() { LC_ALL=C tr -d '[:space:]' <"$1" | wc -c | tr -d ' '; }
+
+# extract_report <transcript> <outfile> [stage-label]
+# Writes the stage's report to <outfile>. Exit status:
+#   0  fenced report found — this is the good path
+#   1  no fence; a de-noised transcript was written instead (model ignored the
+#      format instruction — still far smaller than the raw capture)
+#   2  nothing substantive — the stage produced no report
+#
+# There is deliberately no "recover it anyway" pass here. Dropping the tool-output
+# rule does salvage a report the de-noiser swallowed, but it cannot tell that
+# report from tool output, so a model that runs git diff and then stops gets its
+# own diff forwarded as its review and the run is called ok — which is precisely
+# the failure the blank check exists to catch. A fenced report is already immune
+# (the fence outranks the state machine, above); an unfenced one has no anchor to
+# recover from, so it is reported blank and its transcript is kept to be read.
+extract_report() {
+  local in="$1" out="$2" stage="${3:-stage}" rc bytes
+
+  denoise "$in" >"$out"
+  rc=$?
+  bytes="$(report_bytes "$out")"
+  [ "$bytes" -ge "$REPORT_MIN_BYTES" ] && return "$rc"
+
+  : >"$out"
+  retain_transcript "$in" "$stage"
+  log "WARN: ${stage}: no report could be extracted from $(wc -c <"$in" | tr -d ' ') B of transcript. Transcript: ${KEPT_PATH:-<empty, not kept>}"
+  return 2
 }
 
 # stage_note <run-exit-status> <extract-status> -> the label shown in the log and
@@ -440,7 +516,7 @@ if [ -n "$SINGLE_AGENT" ]; then
   st=$?
   # A pre-configured agent has its own prompt and cannot be told to fence, so a
   # missing fence here is expected; the de-noising still applies.
-  extract_report "$single_out" "$single_rep"
+  extract_report "$single_out" "$single_rep" "single-agent"
   ex=$?
   cat "$single_rep"
   echo "===== END OF REVIEW ====="
@@ -456,7 +532,7 @@ if [ -n "$SINGLE_MODEL" ]; then
   echo "===== OPENCODE REVIEW (model ${SINGLE_MODEL}) — ${SCOPE} ====="
   oc_run --model "$SINGLE_MODEL" "$(member_msg "$(read_prompt "$PROMPTS_DIR/swe.md")")" "$single_out"
   st=$?
-  extract_report "$single_out" "$single_rep"
+  extract_report "$single_out" "$single_rep" "single-model"
   ex=$?
   cat "$single_rep"
   echo "===== END OF REVIEW ====="
@@ -488,9 +564,9 @@ wait "$swe_job"
 swe_st=$?
 wait "$arch_job"
 arch_st=$?
-extract_report "$swe_out" "$swe_rep"
+extract_report "$swe_out" "$swe_rep" "swe"
 swe_ex=$?
-extract_report "$arch_out" "$arch_rep"
+extract_report "$arch_out" "$arch_rep" "architect"
 arch_ex=$?
 log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex"), architect=$(stage_note "$arch_st" "$arch_ex")"
 
@@ -507,7 +583,7 @@ chair_msg="$(printf '%s\n\n===== SWE report (correctness/bugs/security) [%s] ===
 log "phase 2: chair prompt is $(printf '%s' "$chair_msg" | wc -c | tr -d ' ') B (swe report $(wc -c <"$swe_rep" | tr -d ' ') B of $(wc -c <"$swe_out" | tr -d ' ') B captured, architect $(wc -c <"$arch_rep" | tr -d ' ') B of $(wc -c <"$arch_out" | tr -d ' ') B)"
 oc_run --model "$CHAIR_MODEL" "$chair_msg" "$chair_out"
 chair_st=$?
-extract_report "$chair_out" "$chair_rep"
+extract_report "$chair_out" "$chair_rep" "chair"
 chair_ex=$?
 
 # Phase 3 (optional) — fact-check the chair's report against the diff only,
@@ -523,7 +599,7 @@ if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "
     "$FACTCHECK_PERSONA" "$(cat "$chair_rep")" "$MSG")"
   oc_run --model "$FACTCHECK_MODEL" "$fc_msg" "$fc_out"
   fc_st=$?
-  extract_report "$fc_out" "$fc_rep"
+  extract_report "$fc_out" "$fc_rep" "factcheck"
   fc_ex=$?
   if [ "$fc_st" -eq 0 ] && [ "$fc_ex" -ne 2 ]; then
     fc_applied=1
