@@ -201,20 +201,37 @@ DIRTY_LIST="$(uncommitted_files)"
 DIRTY=0
 [ -n "$DIRTY_LIST" ] && DIRTY="$(printf '%s\n' "$DIRTY_LIST" | wc -l | tr -d ' ')"
 
-# The cheapest honest proxy for "a PR may exist" that needs no gh: the branch has
-# an upstream, so it is on the remote and something could have been opened
-# against it. Sitting on the base branch is not a PR situation.
+# Evidence that the branch reached the remote, where a PR could have been opened
+# against it. Two independent signals, because either alone misses:
+#   @{upstream}                 set by `git push -u` / a tracked checkout
+#   refs/remotes/<remote>/<cur> present after any plain `git push origin <br>`,
+#                               which sets no upstream at all
+# Guarded on CUR != HEAD: detached HEAD would otherwise match refs/remotes/*/HEAD
+# (origin/HEAD exists in most clones) and report every detached run as pushed.
 UPSTREAM="$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
-PUSHED=0
-[ "$CUR" != "$BASE" ] && [ -n "$UPSTREAM" ] && PUSHED=1
-
-# Only claim there is no PR when that was actually established.
-NO_GH="Review from the local git state only; do not run any gh command."
-if [ "$PUSHED" -eq 1 ]; then
-  PR_NOTE="$NO_GH"
-else
-  PR_NOTE="There is no pull request yet; ${NO_GH}"
+REMOTE_REF=""
+if [ "$CUR" != "HEAD" ] && [ "$CUR" != "$BASE" ]; then
+  REMOTE_REF="$(git for-each-ref --format='%(refname:short)' "refs/remotes/*/${CUR}" 2>/dev/null | head -1)"
 fi
+PUSHED=0
+[ "$CUR" != "$BASE" ] && { [ -n "$UPSTREAM" ] || [ -n "$REMOTE_REF" ]; } && PUSHED=1
+PUSHED_VIA="${UPSTREAM:-$REMOTE_REF}"
+
+# The prompt never states whether a PR exists, in either direction.
+#
+# It used to assert "There is no pull request yet" whenever no upstream was set —
+# but a branch pushed as `git push origin <branch>` sets no upstream while being
+# very much on the remote, so the assertion was false exactly when it mattered.
+# Widening the check does not fix the class: a remote-tracking ref can be stale,
+# and a branch pushed from another machine and never fetched here leaves no local
+# trace at all. Absence of evidence is not evidence of absence, and short of
+# running gh — which this skill does not do — the local repo cannot settle it.
+#
+# So the claim is dropped rather than made more accurate. The half that carries
+# the actual instruction is unconditionally true and is all the models need; PR
+# existence was never something they had to act on. PUSHED now feeds only the
+# operator-facing warning below, where a false positive costs nothing.
+PR_NOTE="Review from the local git state only; do not run any gh command."
 
 MSG_UNCOMMITTED="Review the current UNCOMMITTED changes in this repo: combine git diff, git diff --cached, and untracked files from git status --short."
 
@@ -278,7 +295,7 @@ target)
   ;;
 esac
 [ "$PUSHED" -eq 1 ] &&
-  log "WARN  : '${CUR}' tracks '${UPSTREAM}' — already pushed, so a PR may exist. This skill is the PRE-PR path and runs no gh; review an open PR in the OpenCode TUI instead."
+  log "WARN  : '${CUR}' is on the remote as '${PUSHED_VIA}' — a PR may exist. This skill is the PRE-PR path and runs no gh; review an open PR in the OpenCode TUI instead."
 
 # ------------------------------------------------------- file-type rule matching
 # Port of open-code-review's path-based rule injection: each changed file is

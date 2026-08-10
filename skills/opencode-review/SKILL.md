@@ -78,10 +78,19 @@ than silently shaping the review:
 [opencode-review]         3 commits + 2 uncommitted files, BOTH included
 ```
 
-If the branch has an upstream it is already pushed, so a PR may exist — the run logs a warning
-and, more importantly, **stops telling the models there is no PR**. That claim used to be
-injected into every reviewer's prompt unconditionally, and it is false the moment a PR is open.
-No `gh` is involved: the signal is `git rev-parse --abbrev-ref @{upstream}`.
+If the branch looks like it reached the remote — it has an upstream, **or** a
+`refs/remotes/<remote>/<branch>` exists, since a plain `git push origin <branch>` sets no
+upstream — the run logs a warning that a PR may exist and this is the pre-PR path.
+
+The prompt itself **never states whether a PR exists**, in either direction. It used to assert
+*"There is no pull request yet"* whenever no upstream was set, which is false exactly in the
+case above. Widening the check does not fix the class — a remote-tracking ref can be stale, and
+a branch pushed from another machine and never fetched here leaves no local trace at all — so
+short of running `gh`, the local repo cannot settle it. The claim is therefore dropped rather
+than made more accurate; the half that carries the actual instruction ("review from the local
+git state only; do not run any `gh` command") is unconditionally true and is all the models
+need. The pushed signal now feeds only the operator-facing warning, where a false positive
+costs nothing.
 
 To target something specific — this is also how you deliberately review one side when both are
 present, which is why there is no separate stage-override knob:
