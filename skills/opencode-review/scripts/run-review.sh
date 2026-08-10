@@ -25,6 +25,10 @@
 #   bash run-review.sh ""         # force: uncommitted changes
 #
 # Env overrides:
+#   OPENCODE_REVIEW_PROVIDER     provider to reach the default models through, e.g.
+#                                "omniroute" -> omniroute/opencode-go/glm-5.2. Applies
+#                                to the four DEFAULTS below only; an explicit *_MODEL
+#                                is always a full id. Unset = direct (unchanged).
 #   OPENCODE_REVIEW_SWE_MODEL    default opencode-go/kimi-k2.7-code
 #   OPENCODE_REVIEW_ARCH_MODEL   default opencode-go/glm-5.2
 #   OPENCODE_REVIEW_CHAIR_MODEL  default opencode-go/qwen3.7-max
@@ -46,9 +50,29 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROMPTS_DIR="$SCRIPT_DIR/../prompts"
 
-SWE_MODEL="${OPENCODE_REVIEW_SWE_MODEL:-opencode-go/kimi-k2.7-code}"
-ARCH_MODEL="${OPENCODE_REVIEW_ARCH_MODEL:-opencode-go/glm-5.2}"
-CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-opencode-go/qwen3.7-max}"
+# ------------------------------------------------------------- model selection
+# The defaults name the models by their DIRECT provider (opencode-go/…), which is
+# one account. A setup that fronts several plans with a router (OmniRoute and the
+# like) exposes the same models one level down — omniroute/opencode-go/glm-5.2 —
+# and reaching them that way is what spreads a run's four calls (two of them
+# concurrent) across the plans instead of stacking them on one.
+#
+# So the router is a PREFIX on the defaults, not a new set of defaults: hardcoding
+# a router id would tie this skill to one machine's config, and every reviewer
+# model would silently 404 anywhere that provider is not configured. Unset, the
+# ids are exactly what they were.
+#
+# It deliberately does not touch OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL
+# or OPENCODE_REVIEW_MODEL: those are ids the caller wrote out, and prefixing them
+# would make "the id I asked for" not the id that runs. Route an explicit override
+# by spelling the provider into it.
+PROVIDER="${OPENCODE_REVIEW_PROVIDER:-}"
+PROVIDER="${PROVIDER%/}" # tolerate "omniroute/"
+PROVIDER_PREFIX="${PROVIDER:+${PROVIDER}/}"
+
+SWE_MODEL="${OPENCODE_REVIEW_SWE_MODEL:-${PROVIDER_PREFIX}opencode-go/kimi-k2.7-code}"
+ARCH_MODEL="${OPENCODE_REVIEW_ARCH_MODEL:-${PROVIDER_PREFIX}opencode-go/glm-5.2}"
+CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-${PROVIDER_PREFIX}opencode-go/qwen3.7-max}"
 # Optional fact-check pass over the chair's report (port of open-code-review's
 # REVIEW_FILTER_TASK: prune only findings the diff can directly falsify). Set
 # OPENCODE_REVIEW_FACTCHECK=0 to skip. Defaults to a reasoning-strong model that is
@@ -56,7 +80,7 @@ CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-opencode-go/qwen3.7-max}"
 # tools), and its failure mode is over-pruning, so it rewards disciplined instruction
 # following and faithful report reproduction over coding/agentic ability.
 FACTCHECK_ENABLED="${OPENCODE_REVIEW_FACTCHECK:-1}"
-FACTCHECK_MODEL="${OPENCODE_REVIEW_FACTCHECK_MODEL:-opencode-go/deepseek-v4-pro}"
+FACTCHECK_MODEL="${OPENCODE_REVIEW_FACTCHECK_MODEL:-${PROVIDER_PREFIX}opencode-go/deepseek-v4-pro}"
 SINGLE_MODEL="${OPENCODE_REVIEW_MODEL:-}"
 SINGLE_AGENT="${OPENCODE_REVIEW_AGENT:-}"
 TIMEOUT="${OPENCODE_REVIEW_TIMEOUT:-900}"

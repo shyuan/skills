@@ -66,6 +66,16 @@ bash scripts/run-review.sh ""            # force: uncommitted changes
 
 Optional environment overrides:
 
+- `OPENCODE_REVIEW_PROVIDER=<id>` — reach the **default** models through a provider one level
+  up, e.g. `omniroute` → `omniroute/opencode-go/glm-5.2`. For a setup that fronts several
+  OpenCode plans with a router, this is what spreads a run's four calls (two of them
+  concurrent) across the plans instead of stacking them on one account. Unset (the default)
+  the ids are used directly, unchanged. It applies to the four defaults only — an explicit
+  `*_MODEL` below is always a full id, so spell the provider into it if you want it routed.
+  Caveat: a router configured as a generic OpenAI-compatible provider is not in models.dev,
+  so opencode has no context/output limits for its models and a diff that overruns one
+  surfaces as a provider error rather than an up-front warning. Declare `limit` on those
+  models in `opencode.jsonc` if that bites.
 - `OPENCODE_REVIEW_SWE_MODEL` / `OPENCODE_REVIEW_ARCH_MODEL` / `OPENCODE_REVIEW_CHAIR_MODEL`
   — override the committee's models (defaults: `opencode-go/kimi-k2.7-code`, `opencode-go/glm-5.2`,
   `opencode-go/qwen3.7-max`).
