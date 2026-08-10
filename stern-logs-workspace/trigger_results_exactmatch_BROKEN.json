@@ -1,0 +1,255 @@
+{
+  "summary": {
+    "model": "claude-opus-5",
+    "runs_per_query": 3,
+    "accuracy": 0.55,
+    "precision": 1.0,
+    "recall": 0.1,
+    "true_positive": 1,
+    "false_negative": 9,
+    "false_positive": 0,
+    "true_negative": 10
+  },
+  "results": [
+    {
+      "query": "api-gateway 那邊一直回 502，但我不確定是 gateway 自己還是後面的 service-a 或 core component 掛了。三個服務都在 asgard-dev 這個 namespace，有辦法一次看它們的 log 找出是哪一跳出問題嗎",
+      "should_trigger": true,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": false,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "our payments deployment in prod has 6 replicas and one of them keeps returning 500s but i can't tell which one. need to see the logs from all of them at once, ideally with the pod name on each line",
+      "should_trigger": true,
+      "hits": 1,
+      "runs": 3,
+      "rate": 0.3333333333333333,
+      "correct": false,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "checkout-worker is stuck in CrashLoopBackOff and kubectl logs just gives me the container that's about to start again. how do i see what the run that actually crashed printed",
+      "should_trigger": true,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": false,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "幫我看一下 k8s 上 order-service 最近半小時有沒有 panic 或 fatal",
+      "should_trigger": true,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": false,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "just rolled v2.3.1 of the recommendation service out to staging (3 pods, deployment/reco-api). want to watch them come up and catch any startup errors before i promote it",
+      "should_trigger": true,
+      "hits": 1,
+      "runs": 3,
+      "rate": 0.3333333333333333,
+      "correct": false,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "our pods all have istio sidecars injected so when i tail anything it's 90% envoy access log noise. i only want the app container output from deployment search-api in the mesh namespace",
+      "should_trigger": true,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": false,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "need to find every occurrence of 'connection refused' across all the pods in our prod namespace in the last hour or so — there are about 60 containers in there",
+      "should_trigger": true,
+      "hits": 2,
+      "runs": 3,
+      "rate": 0.6666666666666666,
+      "correct": true,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "the service logs json via zap and reading it raw is unbearable. can i get just level + msg + which pod it came from, as one readable line per entry, while tailing the deployment?",
+      "should_trigger": true,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": false,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "tailing every container in our mesh namespace takes like 30 seconds before a single line shows up, and there's no error. is that normal or is something misconfigured",
+      "should_trigger": true,
+      "hits": 1,
+      "runs": 3,
+      "rate": 0.3333333333333333,
+      "correct": false,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "i need the output from the container that already died, not the one running now — it's a batch job pod in the etl namespace that failed overnight",
+      "should_trigger": true,
+      "hits": 1,
+      "runs": 3,
+      "rate": 0.3333333333333333,
+      "correct": false,
+      "tools_seen": [
+        "Bash",
+        "Read",
+        "Skill"
+      ]
+    },
+    {
+      "query": "後端跑起來一直噴錯，幫我看一下 log。檔案在 ./logs/app.log，最後 200 行左右就夠了",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": [
+        "Bash"
+      ]
+    },
+    {
+      "query": "the github actions run for PR #412 failed at the build step. can you pull up the CI logs and tell me what broke",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": [
+        "Bash",
+        "Read"
+      ]
+    },
+    {
+      "query": "docker compose up 之後 postgres 那個 container 一直 restart，看它 log 說什麼",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": [
+        "Bash"
+      ]
+    },
+    {
+      "query": "we're using log.Printf all over this Go service and the output is unstructured garbage. switch it to slog with proper levels and a request id on every line",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": [
+        "Bash",
+        "Read"
+      ]
+    },
+    {
+      "query": "我要在 CloudWatch Logs Insights 查上週那批 lambda timeout 的紀錄，query 語法要怎麼寫",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": []
+    },
+    {
+      "query": "the frontend pod has been Pending for 20 minutes and never schedules. is it a resource request problem or a taint on the nodes?",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": [
+        "Bash"
+      ]
+    },
+    {
+      "query": "ssh 到 bastion 後面那台 EC2，看 nginx 的 access log 找出 5xx 集中在哪個 path",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": [
+        "Bash",
+        "Read"
+      ]
+    },
+    {
+      "query": "write me a fluent-bit config that ships container logs off our nodes to loki, with the k8s namespace and pod name as labels",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": []
+    },
+    {
+      "query": "got a 400MB apache access log sitting in ~/Downloads. count the unique IPs and give me the top 20 requested paths",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": [
+        "Bash",
+        "ToolSearch"
+      ]
+    },
+    {
+      "query": "our Service isn't routing to the new pods — selector says app=web, the pods have that label, but kubectl get endpoints shows nothing",
+      "should_trigger": false,
+      "hits": 0,
+      "runs": 3,
+      "rate": 0.0,
+      "correct": true,
+      "tools_seen": [
+        "Bash"
+      ]
+    }
+  ]
+}
