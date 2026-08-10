@@ -38,8 +38,13 @@ there is no PR yet.
 
 After code is written and before opening a pull request. The changes may be:
 
-- uncommitted (working tree and/or staged), or
-- committed on a feature branch that has no PR yet.
+- **(a)** uncommitted (working tree and/or staged, including untracked files), or
+- **(b)** committed on a feature branch that has no PR yet, or
+- **both at once** — commits on the branch with more work still in the tree.
+
+**(c)** once a PR is open is *not* this skill's path (that one is interactive in the OpenCode
+TUI and uses `gh`). The script detects it anyway — see the pushed-branch warning below — so
+that an accidental run says so instead of quietly reviewing the wrong thing.
 
 ## How to run it
 
@@ -50,22 +55,64 @@ diff). The script lives in this skill's directory under `scripts/`:
 bash scripts/run-review.sh
 ```
 
-With no argument it auto-detects the scope:
+With no argument it detects the stage. "Ahead of base" and "dirty tree" are measured
+**independently**, because both are routinely true at once:
 
-- if `git status` shows uncommitted/untracked changes → reviews the working tree;
-- otherwise, if the current branch is ahead of its base (`origin/HEAD`, else `main`/`master`)
-  → reviews `base...HEAD`.
+| commits ahead of base | uncommitted work | reviewed |
+|---|---|---|
+| — | yes | **(a)** the working tree |
+| yes | — | **(b)** `base...HEAD` |
+| yes | yes | **(a+b)** the union of the two |
+| — | — | nothing; exits 0 |
 
-To target something specific:
+The union case is the one that matters. Chaining these as an either/or — review the tree *if*
+it is dirty, else the branch — means a branch holding the real work plus one stray untracked
+file reviews the stray file, skips every commit, and logs a scope line that reads as correct.
+Base is `origin/HEAD`, else `main`/`master`.
+
+The chosen stage is logged, **including what it left out**, so a wrong call is visible rather
+than silently shaping the review:
+
+```
+[opencode-review] stage : (a+b) branch 'x' vs 'main'
+[opencode-review]         3 commits + 2 uncommitted files, BOTH included
+```
+
+If the branch looks like it reached the remote — it has an upstream, **or** a
+`refs/remotes/<remote>/<branch>` exists, since a plain `git push origin <branch>` sets no
+upstream — the run logs a warning that a PR may exist and this is the pre-PR path.
+
+The prompt itself **never states whether a PR exists**, in either direction. It used to assert
+*"There is no pull request yet"* whenever no upstream was set, which is false exactly in the
+case above. Widening the check does not fix the class — a remote-tracking ref can be stale, and
+a branch pushed from another machine and never fetched here leaves no local trace at all — so
+short of running `gh`, the local repo cannot settle it. The claim is therefore dropped rather
+than made more accurate; the half that carries the actual instruction ("review from the local
+git state only; do not run any `gh` command") is unconditionally true and is all the models
+need. The pushed signal now feeds only the operator-facing warning, where a false positive
+costs nothing.
+
+To target something specific — this is also how you deliberately review one side when both are
+present, which is why there is no separate stage-override knob:
 
 ```bash
 bash scripts/run-review.sh main          # diff current branch vs main
 bash scripts/run-review.sh <commit-sha>  # one commit
-bash scripts/run-review.sh ""            # force: uncommitted changes
+bash scripts/run-review.sh ""            # force: uncommitted changes only
 ```
 
 Optional environment overrides:
 
+- `OPENCODE_REVIEW_PROVIDER=<id>` — reach the **default** models through a provider one level
+  up, e.g. `omniroute` → `omniroute/opencode-go/glm-5.2`. For a setup that fronts several
+  OpenCode plans with a router, this is what spreads a run's four calls (two of them
+  concurrent) across the plans instead of stacking them on one account. Unset (the default)
+  the ids are used directly, unchanged. It applies to the four defaults only — an explicit
+  `*_MODEL` below is always a full id, so spell the provider into it if you want it routed.
+  Caveat: a router configured as a generic OpenAI-compatible provider is not in models.dev,
+  so opencode has no context/output limits for its models and a diff that overruns one
+  surfaces as a provider error rather than an up-front warning. Declare `limit` on those
+  models in `opencode.jsonc` if that bites.
 - `OPENCODE_REVIEW_SWE_MODEL` / `OPENCODE_REVIEW_ARCH_MODEL` / `OPENCODE_REVIEW_CHAIR_MODEL`
   — override the committee's models (defaults: `opencode-go/kimi-k2.7-code`, `opencode-go/glm-5.2`,
   `opencode-go/qwen3.7-max`).

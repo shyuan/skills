@@ -19,12 +19,16 @@
 #   Chair     (dedupe + verify + fill gaps)     prompts/chair.md
 #
 # Run from the repository root:
-#   bash run-review.sh            # auto-detect: uncommitted, else branch vs base
+#   bash run-review.sh            # detect the stage: uncommitted and/or branch vs base
 #   bash run-review.sh main       # diff current branch vs "main"
 #   bash run-review.sh <sha>      # a specific commit
-#   bash run-review.sh ""         # force: uncommitted changes
+#   bash run-review.sh ""         # force: uncommitted changes only
 #
 # Env overrides:
+#   OPENCODE_REVIEW_PROVIDER     provider to reach the default models through, e.g.
+#                                "omniroute" -> omniroute/opencode-go/glm-5.2. Applies
+#                                to the four DEFAULTS below only; an explicit *_MODEL
+#                                is always a full id. Unset = direct (unchanged).
 #   OPENCODE_REVIEW_SWE_MODEL    default opencode-go/kimi-k2.7-code
 #   OPENCODE_REVIEW_ARCH_MODEL   default opencode-go/glm-5.2
 #   OPENCODE_REVIEW_CHAIR_MODEL  default opencode-go/qwen3.7-max
@@ -46,9 +50,29 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROMPTS_DIR="$SCRIPT_DIR/../prompts"
 
-SWE_MODEL="${OPENCODE_REVIEW_SWE_MODEL:-opencode-go/kimi-k2.7-code}"
-ARCH_MODEL="${OPENCODE_REVIEW_ARCH_MODEL:-opencode-go/glm-5.2}"
-CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-opencode-go/qwen3.7-max}"
+# ------------------------------------------------------------- model selection
+# The defaults name the models by their DIRECT provider (opencode-go/…), which is
+# one account. A setup that fronts several plans with a router (OmniRoute and the
+# like) exposes the same models one level down — omniroute/opencode-go/glm-5.2 —
+# and reaching them that way is what spreads a run's four calls (two of them
+# concurrent) across the plans instead of stacking them on one.
+#
+# So the router is a PREFIX on the defaults, not a new set of defaults: hardcoding
+# a router id would tie this skill to one machine's config, and every reviewer
+# model would silently 404 anywhere that provider is not configured. Unset, the
+# ids are exactly what they were.
+#
+# It deliberately does not touch OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL
+# or OPENCODE_REVIEW_MODEL: those are ids the caller wrote out, and prefixing them
+# would make "the id I asked for" not the id that runs. Route an explicit override
+# by spelling the provider into it.
+PROVIDER="${OPENCODE_REVIEW_PROVIDER:-}"
+PROVIDER="${PROVIDER%/}" # tolerate "omniroute/"
+PROVIDER_PREFIX="${PROVIDER:+${PROVIDER}/}"
+
+SWE_MODEL="${OPENCODE_REVIEW_SWE_MODEL:-${PROVIDER_PREFIX}opencode-go/kimi-k2.7-code}"
+ARCH_MODEL="${OPENCODE_REVIEW_ARCH_MODEL:-${PROVIDER_PREFIX}opencode-go/glm-5.2}"
+CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-${PROVIDER_PREFIX}opencode-go/qwen3.7-max}"
 # Optional fact-check pass over the chair's report (port of open-code-review's
 # REVIEW_FILTER_TASK: prune only findings the diff can directly falsify). Set
 # OPENCODE_REVIEW_FACTCHECK=0 to skip. Defaults to a reasoning-strong model that is
@@ -56,7 +80,7 @@ CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-opencode-go/qwen3.7-max}"
 # tools), and its failure mode is over-pruning, so it rewards disciplined instruction
 # following and faithful report reproduction over coding/agentic ability.
 FACTCHECK_ENABLED="${OPENCODE_REVIEW_FACTCHECK:-1}"
-FACTCHECK_MODEL="${OPENCODE_REVIEW_FACTCHECK_MODEL:-opencode-go/deepseek-v4-pro}"
+FACTCHECK_MODEL="${OPENCODE_REVIEW_FACTCHECK_MODEL:-${PROVIDER_PREFIX}opencode-go/deepseek-v4-pro}"
 SINGLE_MODEL="${OPENCODE_REVIEW_MODEL:-}"
 SINGLE_AGENT="${OPENCODE_REVIEW_AGENT:-}"
 TIMEOUT="${OPENCODE_REVIEW_TIMEOUT:-900}"
@@ -135,41 +159,143 @@ detect_base() {
   printf 'main'
 }
 
-NO_PR="There is no pull request yet; do not run any gh command."
+# uncommitted_files prints every path carrying uncommitted work: tracked
+# modifications, staged changes, and untracked-but-not-ignored files.
+uncommitted_files() {
+  {
+    git diff --name-only
+    git diff --cached --name-only
+    git ls-files --others --exclude-standard
+  } 2>/dev/null | sed '/^$/d' | sort -u
+}
+
+# ------------------------------------------------------------- stage detection
+# Which review stage this run is in. "Committed on a branch" and "still in the
+# working tree" are INDEPENDENT facts, not a chain, so they are measured
+# separately:
+#
+#   (a) uncommitted  work in the working tree, nothing committed yet
+#   (b) branch       committed on a branch, no PR
+#   (a+b) both       BOTH are true -> review the union, and say so
+#   (c) pushed       the branch is on the remote, so a PR may already exist
+#
+# Chaining them is a silent mis-target. The previous `if dirty; then uncommitted;
+# else branch; fi` reviewed a branch's commits only when the tree happened to be
+# spotless — so a branch carrying the real work plus one stray untracked file
+# reviewed the stray file, skipped every commit, and logged a scope line that
+# read as perfectly correct.
+#
+# (c) is detected but never handled: this skill is the pre-PR path and runs no gh
+# (see SKILL.md). Detecting it is what lets the run stop ASSERTING that no PR
+# exists — that claim was injected into every member's prompt unconditionally,
+# and it is false the moment a PR is open.
+CUR="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+BASE="$(detect_base)"
+
+AHEAD=0
+if [ "$CUR" != "$BASE" ] && git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null 2>&1; then
+  AHEAD="$(git rev-list --count "${BASE}..HEAD" 2>/dev/null || printf 0)"
+fi
+
+DIRTY_LIST="$(uncommitted_files)"
+DIRTY=0
+[ -n "$DIRTY_LIST" ] && DIRTY="$(printf '%s\n' "$DIRTY_LIST" | wc -l | tr -d ' ')"
+
+# Evidence that the branch reached the remote, where a PR could have been opened
+# against it. Two independent signals, because either alone misses:
+#   @{upstream}                 set by `git push -u` / a tracked checkout
+#   refs/remotes/<remote>/<cur> present after any plain `git push origin <br>`,
+#                               which sets no upstream at all
+# Guarded on CUR != HEAD: detached HEAD would otherwise match refs/remotes/*/HEAD
+# (origin/HEAD exists in most clones) and report every detached run as pushed.
+UPSTREAM="$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+REMOTE_REF=""
+if [ "$CUR" != "HEAD" ] && [ "$CUR" != "$BASE" ]; then
+  REMOTE_REF="$(git for-each-ref --format='%(refname:short)' "refs/remotes/*/${CUR}" 2>/dev/null | head -1)"
+fi
+PUSHED=0
+[ "$CUR" != "$BASE" ] && { [ -n "$UPSTREAM" ] || [ -n "$REMOTE_REF" ]; } && PUSHED=1
+PUSHED_VIA="${UPSTREAM:-$REMOTE_REF}"
+
+# The prompt never states whether a PR exists, in either direction.
+#
+# It used to assert "There is no pull request yet" whenever no upstream was set —
+# but a branch pushed as `git push origin <branch>` sets no upstream while being
+# very much on the remote, so the assertion was false exactly when it mattered.
+# Widening the check does not fix the class: a remote-tracking ref can be stale,
+# and a branch pushed from another machine and never fetched here leaves no local
+# trace at all. Absence of evidence is not evidence of absence, and short of
+# running gh — which this skill does not do — the local repo cannot settle it.
+#
+# So the claim is dropped rather than made more accurate. The half that carries
+# the actual instruction is unconditionally true and is all the models need; PR
+# existence was never something they had to act on. PUSHED now feeds only the
+# operator-facing warning below, where a false positive costs nothing.
+PR_NOTE="Review from the local git state only; do not run any gh command."
+
+MSG_UNCOMMITTED="Review the current UNCOMMITTED changes in this repo: combine git diff, git diff --cached, and untracked files from git status --short."
 
 # SCOPE_MODE/SCOPE_ARG are recorded alongside the human-readable SCOPE so the
 # rule-matching step (below) can re-derive the exact list of changed files.
+# An explicit argument always wins: it is how you ask for one side on purpose
+# when both are present ("" forces the working tree, a base name forces the
+# branch diff), which is why no separate stage-override knob exists.
 if [ "$#" -ge 1 ]; then
   arg="$1"
   if [ -z "$arg" ]; then
     SCOPE="uncommitted changes (forced)"
     SCOPE_MODE="uncommitted"
-    MSG="Review the current UNCOMMITTED changes in this repo: combine git diff, git diff --cached, and untracked files from git status --short. ${NO_PR}"
+    MSG="${MSG_UNCOMMITTED} ${PR_NOTE}"
   else
     SCOPE="explicit target '${arg}'"
     SCOPE_MODE="target"
     SCOPE_ARG="$arg"
-    MSG="Review target: ${arg}. Interpret it as a commit SHA (git show <sha>) or a branch name to diff against HEAD (git diff <branch>...HEAD). ${NO_PR}"
+    MSG="Review target: ${arg}. Interpret it as a commit SHA (git show <sha>) or a branch name to diff against HEAD (git diff <branch>...HEAD). ${PR_NOTE}"
   fi
+elif [ "$AHEAD" -gt 0 ] && [ "$DIRTY" -gt 0 ]; then
+  SCOPE="branch '${CUR}' vs '${BASE}' (${AHEAD} commits) + ${DIRTY} uncommitted files"
+  SCOPE_MODE="both"
+  SCOPE_ARG="$BASE"
+  MSG="Review BOTH of the following together, as one change set: (1) the diff of the current branch against ${BASE}: git diff ${BASE}...HEAD; and (2) the uncommitted changes layered on top of it: git diff, git diff --cached, and untracked files from git status --short. They are the same in-progress work at two different points, so judge them as a whole. ${PR_NOTE}"
+elif [ "$DIRTY" -gt 0 ]; then
+  SCOPE="uncommitted changes"
+  SCOPE_MODE="uncommitted"
+  MSG="${MSG_UNCOMMITTED} ${PR_NOTE}"
+elif [ "$AHEAD" -gt 0 ]; then
+  SCOPE="branch '${CUR}' vs '${BASE}'"
+  SCOPE_MODE="branch"
+  SCOPE_ARG="$BASE"
+  MSG="Review the diff of the current branch against ${BASE}: git diff ${BASE}...HEAD. ${PR_NOTE}"
 else
-  if [ -n "$(git status --porcelain)" ]; then
-    SCOPE="uncommitted changes"
-    SCOPE_MODE="uncommitted"
-    MSG="Review the current UNCOMMITTED changes in this repo: combine git diff, git diff --cached, and untracked files from git status --short. ${NO_PR}"
-  else
-    base="$(detect_base)"
-    cur="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
-    if [ "$cur" != "$base" ] && [ -n "$(git rev-list "${base}..HEAD" 2>/dev/null)" ]; then
-      SCOPE="branch '${cur}' vs '${base}'"
-      SCOPE_MODE="branch"
-      SCOPE_ARG="$base"
-      MSG="Review the diff of the current branch against ${base}: git diff ${base}...HEAD. ${NO_PR}"
-    else
-      log "Nothing to review: working tree is clean and no commits ahead of base. Done."
-      exit 0
-    fi
-  fi
+  log "Nothing to review: working tree is clean and no commits ahead of '${BASE}'. Done."
+  exit 0
 fi
+
+# Say which stage was chosen AND what it left out, so a wrong call is visible in
+# the log instead of silently shaping the review.
+case "$SCOPE_MODE" in
+both)
+  log "stage : (a+b) branch '${CUR}' vs '${BASE}'"
+  log "        ${AHEAD} commits + ${DIRTY} uncommitted files, BOTH included"
+  ;;
+uncommitted)
+  log "stage : (a) uncommitted — ${DIRTY} files in the working tree"
+  [ "$AHEAD" -gt 0 ] &&
+    log "        NOT included: ${AHEAD} commits on '${CUR}' vs '${BASE}' (excluded by argument)"
+  ;;
+branch)
+  log "stage : (b) branch '${CUR}' vs '${BASE}' — ${AHEAD} commits"
+  [ "$DIRTY" -gt 0 ] &&
+    log "        NOT included: ${DIRTY} uncommitted files (excluded by argument)"
+  ;;
+target)
+  log "stage : explicit target '${SCOPE_ARG}'"
+  [ "$DIRTY" -gt 0 ] &&
+    log "        NOT included: ${DIRTY} uncommitted files (excluded by argument)"
+  ;;
+esac
+[ "$PUSHED" -eq 1 ] &&
+  log "WARN  : '${CUR}' is on the remote as '${PUSHED_VIA}' — a PR may exist. This skill is the PRE-PR path and runs no gh; review an open PR in the OpenCode TUI instead."
 
 # ------------------------------------------------------- file-type rule matching
 # Port of open-code-review's path-based rule injection: each changed file is
@@ -212,17 +338,19 @@ map_rule() {
 }
 
 # changed_files prints the affected paths for the resolved scope (one per line).
+# It must cover exactly what MSG told the members to review — a path missing here
+# gets no file-type checklist, so the models review it with the wrong focus.
 changed_files() {
   case "$SCOPE_MODE" in
   uncommitted)
-    {
-      git diff --name-only
-      git diff --cached --name-only
-      git ls-files --others --exclude-standard
-    } 2>/dev/null
+    uncommitted_files
     ;;
   branch)
     git diff --name-only "${SCOPE_ARG}...HEAD" 2>/dev/null
+    ;;
+  both)
+    git diff --name-only "${SCOPE_ARG}...HEAD" 2>/dev/null
+    uncommitted_files
     ;;
   target)
     if git rev-parse --verify --quiet "${SCOPE_ARG}^{commit}" >/dev/null 2>&1 &&
