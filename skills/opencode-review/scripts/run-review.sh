@@ -522,19 +522,39 @@ fi
 PERM_BASH='{"*":"deny","git diff*":"allow","git show*":"allow","git log*":"allow","git status*":"allow","git ls-files*":"allow","git rev-parse*":"allow","git blame*":"allow","git grep*":"allow","cat *":"allow","head *":"allow","tail *":"allow","wc *":"allow","ls":"allow","ls *":"allow","grep *":"allow","rg *":"allow","*;*":"deny","*|*":"deny","*&*":"deny","*>*":"deny","*`*":"deny","*$(*":"deny","*<(*":"deny","*\n*":"deny"}'
 PERM="{\"edit\":\"deny\",\"question\":\"deny\",\"doom_loop\":\"deny\",${EXT_DIR_RULES}\"bash\":${PERM_BASH}}"
 
-swe_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-swe.$$")"
-arch_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-arch.$$")"
-chair_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-chair.$$")"
-fc_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-fc.$$")"
-single_out="$(mktemp 2>/dev/null || echo "/tmp/oc-review-single.$$")"
+# ------------------------------------------------------------- run scratch dir
+# One private directory holds every scratch file this run makes, so no scratch
+# path is ever predictable.
+#
+# Each of these used to be `mktemp 2>/dev/null || echo /tmp/<fixed-name>.$$`.
+# When mktemp works that is fine, and when it does not the fallback hands a local
+# user a name they can compute and pre-place a symlink at — and every one of
+# these paths is a redirection target, so the link is followed and whatever it
+# points at is truncated. KEEP_DIR below already avoids exactly this with
+# `mktemp -d`; these predate it and were never brought in line.
+#
+# Created before anything is written and removed whole on exit. A failure here is
+# fatal rather than a fallback: there is no safe place to put a transcript, and
+# the transcripts contain the diff under review.
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/opencode-review-run-XXXXXXXX" 2>/dev/null)"
+[ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ] ||
+  {
+    log "ERROR: could not create a private temp directory under ${TMPDIR:-/tmp}."
+    exit 1
+  }
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+swe_out="$WORK_DIR/swe.out"
+arch_out="$WORK_DIR/arch.out"
+chair_out="$WORK_DIR/chair.out"
+fc_out="$WORK_DIR/fc.out"
+single_out="$WORK_DIR/single.out"
 # ..._rep holds the report extracted from the matching ..._out transcript.
-swe_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-swe-rep.$$")"
-arch_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-arch-rep.$$")"
-chair_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-chair-rep.$$")"
-fc_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-fc-rep.$$")"
-single_rep="$(mktemp 2>/dev/null || echo "/tmp/oc-review-single-rep.$$")"
-trap 'rm -f "$swe_out" "$arch_out" "$chair_out" "$fc_out" "$single_out" \
-  "$swe_rep" "$arch_rep" "$chair_rep" "$fc_rep" "$single_rep"' EXIT
+swe_rep="$WORK_DIR/swe.rep"
+arch_rep="$WORK_DIR/arch.rep"
+chair_rep="$WORK_DIR/chair.rep"
+fc_rep="$WORK_DIR/fc.rep"
+single_rep="$WORK_DIR/single.rep"
 
 # oc_run <flag> <value> <message> <outfile>
 # Runs one opencode invocation headlessly (flag is --model or --agent), capturing
@@ -556,7 +576,25 @@ oc_run() {
   GIT_PAGER=cat GH_PAGER=cat PAGER=cat OPENCODE_PERMISSION="$PERM" \
     opencode run --pure "$flag" "$val" "$msg" </dev/null >"$out" 2>&1 &
   pid=$!
-  td="$(mktemp 2>/dev/null || echo "/tmp/oc-td.$$")"
+  # Timeout sentinel: the watchdog creates this path to signal that it fired, so
+  # its EXISTENCE is the signal and it starts out deleted.
+  #
+  # Derived from the output file, which is unique per stage. Primarily so the
+  # path is inside WORK_DIR and not one a local user can compute and pre-place a
+  # symlink at — `: >"$td"` would otherwise follow the link and truncate whatever
+  # it pointed to, which is the same hazard as the capture files above.
+  #
+  # It also stops concurrent callers sharing one sentinel. The old fallback name
+  # `/tmp/oc-td.$$` was the same string in both parallel members, since `$$` in
+  # bash is the invoking shell's pid and background subshells inherit it
+  # ($BASHPID differs, $$ does not), so one member's timeout signal was written
+  # where the other was reading. That is a race on shared state rather than a
+  # reliable misreport, and deliberately not claimed as more: whichever member
+  # reads the sentinel also deletes it, so the window in which the other can see
+  # it is microseconds wide, and a constructed timing test could not observe a
+  # wrong verdict. Worth removing on principle; the symlink reason is the one
+  # that stands on its own.
+  td="${out}.timedout"
   rm -f "$td"
   (
     sleep "$TIMEOUT"
@@ -614,19 +652,8 @@ diagnose_models() { # $@ = the model ids whose stages failed
     rc=$?
   else
     # Same shape as oc_run's fallback watchdog, for a machine with no timeout(1).
-    #
-    # No `|| echo /tmp/<fixed>.$$` fallback when mktemp fails, unlike the older
-    # temp files above. A predictable name under a shared /tmp can be pre-placed
-    # as a symlink by a local user, and this one is a redirection target, so the
-    # link would be followed and whatever it points at truncated — the same
-    # hazard KEEP_DIR is created with `mktemp -d` to avoid. This check is
-    # optional by nature, so when there is nowhere safe to write it is skipped
-    # and said, rather than made to work at that price.
-    tmp="$(mktemp 2>/dev/null)"
-    if [ -z "$tmp" ]; then
-      log "diag  : no timeout(1) and mktemp failed, so model access could not be checked."
-      return 0
-    fi
+    # Inside WORK_DIR like every other scratch file, so the path is private.
+    tmp="$WORK_DIR/models.out"
     opencode models >"$tmp" 2>/dev/null &
     pid=$!
     (
