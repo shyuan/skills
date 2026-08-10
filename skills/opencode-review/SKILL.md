@@ -129,47 +129,68 @@ Optional environment overrides:
 - `OPENCODE_REVIEW_STAGGER=<seconds>` — delay between the two parallel member launches
   (default `3`), to avoid opencode's session-init "database is locked" startup race.
 
-The script captures each model's full output (both streams — the report is emitted on
-OpenCode's render stream, not its final stdout message), **extracts the report from that
-capture**, and prints the chair's consolidated report to **stdout** between the
-`===== … REVIEW … =====` and `===== END OF REVIEW =====` markers. Only the script's own
-progress/error lines (prefixed `[opencode-review]`) go to **stderr**. If the chair fails or
-times out, the two member reports are printed as a fallback so you still have something
-actionable.
+Each stage runs with **`--format json`**, so what the script captures is opencode's event
+stream — one JSON object per line — not a rendered transcript. The chair's consolidated report
+is printed to **stdout** between the `===== … REVIEW … =====` and `===== END OF REVIEW =====`
+markers. Only the script's own progress/error lines (prefixed `[opencode-review]`) go to
+**stderr**. If the chair fails or times out, the two member reports are printed as a fallback
+so you still have something actionable.
 
-Extraction matters because the capture is a *transcript*, not a report: it also holds
-tool-call headers, tool output (each member echoes the whole diff), ANSI escapes, and — on
-every denied bash call — the entire `OPENCODE_PERMISSION` ruleset as JSON. So each persona is
-told to fence its report between `<<<REVIEW-REPORT>>>` and `<<<END-REVIEW-REPORT>>>`, and
-every stage passes on only what is between them. If a model ignores the fence the script
-falls back to a de-noised transcript (tool blocks and escapes dropped) and says so in the log.
+**A stage's report is its `text` events, and nothing else.** The event stream separates at the
+source what a rendered transcript merges into undifferentiated lines:
 
-The markers carry a **per-run nonce**: `prompts/*.md` hold the bare token, and `read_prompt`
-rewrites it to `<<<REVIEW-REPORT-<random>>>>` on the way into each message. The fence is
-allowed to outrank the render heuristics, so whatever can emit a marker line controls what is
-taken as the report — and the tree under review can emit one, since members are told to read
-related files and `cat`/`head`/`tail` print content verbatim. A fixed marker would also break
-on this repo, whose own `prompts/*.md` contain the literal token. Edit the personas using the
-bare token; never hardcode a nonced marker.
+| event | carries |
+|---|---|
+| `text` | the model's own words — this is the report |
+| `tool_use` | every byte a tool produced, including tool *errors* |
+| `step_finish` | `reason` the model stopped: `stop`, `tool-calls`, … |
 
-De-noising reads opencode's render structure, and that structure is not fully reliable: a
-tool block is ended by a separator line or an error banner, and a tool call that renders no
-output block (`Read`) emits no separator — so when it is the last call before the report, the
-report begins on the very next line and would be read as more output from that tool. The
-fence therefore outranks the state machine: a `<<<REVIEW-REPORT>>>` line ends a tool block
-wherever it appears. This is why the fence matters beyond tidiness, and why the personas
-insist on it.
+So tool output cannot be mistaken for prose: it never shares a channel with it. The whole diff
+each member reads, the `OPENCODE_PERMISSION` ruleset dumped on every denied bash call, a
+mistyped command's shell error — all `tool_use`, none of them candidates.
 
-There is deliberately **no** "recover it anyway" pass. Dropping the tool-output rule does
-salvage a swallowed report, but it cannot tell that report from tool output — so a model that
-runs `git diff` and then stops would have its own diff forwarded as its review, and the run
-called `ok`. An unfenced report emitted with no separator has no anchor to recover from, so
-it is reported blank and its transcript kept.
+This replaced a `<<<REVIEW-REPORT>>>` fence the personas had to emit, plus a de-noiser that
+inferred structure from rendered output, plus a per-run nonce on the markers. That design
+failed in both directions on real runs. Models that investigated for 30–70 KB and then stopped
+left nothing fenced, so the fallback ran and forwarded whatever its state machine had last
+seen: one run handed the chair **150 bytes of a shell error message** as the SWE report,
+another **99 bytes of a model's opening narration** as the architect's — each logged as
+`ok, but the report was not fenced`, which reads as a formatting nit rather than *this is not
+a review*. Reading `text` events makes that class unrepresentable. It also retires the nonce,
+which existed only because a fence line was authoritative wherever it appeared and members can
+`cat` repository files, so the tree under review could forge one; file content is now tool
+output by construction.
 
-A stage that exits 0 having written **no** report is reported as
-`NO REPORT PRODUCED (run ok)`, not `ok`, in both the log and the message handed to the
-chair — so `prompts/chair.md`'s "note which member is absent" rule can fire, and the run's
-exit status is non-zero. A run that yielded nothing can no longer look successful.
+Requires **`jq`** (preferred) or **`python3`** to read the stream. Checked at startup, before
+any model call, so a machine with neither fails immediately rather than after four runs.
+
+A stage that exits 0 having written **no** report is reported as `NO REPORT PRODUCED`, not
+`ok`, in both the log and the message handed to the chair — so `prompts/chair.md`'s "note which
+member is absent" rule can fire, and the run's exit status is non-zero. A run that yielded
+nothing can no longer look successful.
+
+The event stream also says *how* it produced nothing, which are different failures worth
+telling apart:
+
+```
+[opencode-review] WARN: swe: stopped after 14 tool calls without writing anything (reason=stop).
+```
+
+That is a model that read the diff, investigated, and ended its turn without writing it up —
+not a model that never ran, and not a timeout. It is the failure recorded in
+[issue #33](https://github.com/shyuan/skills/issues/33), where two members did it independently
+on the same run. The script detects and reports it; it does not currently intervene.
+
+**When members are absent, the last thing on stdout says so**, inside the report markers:
+
+```
+**DEGRADED: 2 of 2 members produced no report.** Nothing above is a committee finding —
+it is a solo judgment by the chair model, which read the diff itself.
+```
+
+The chair does note an absence in its own preamble, but that lands where a skimming reader
+misses it — and a chair report built on no members is one model's opinion wearing a committee's
+shape, which is exactly the thing the design exists to avoid.
 
 **When a stage fails, the log also says whether the models were even available.** opencode
 gives no usable answer for a bad model id — `opencode run --model does-not-exist/at-all` exits
@@ -188,14 +209,14 @@ stages' models against `opencode models`:
 ```
 
 When the models *are* all present it says so too — that rules out the most likely cause and
-points you at the transcript instead. `opencode models` costs ~7s, so it runs **only** after
+points you at the kept events instead. `opencode models` costs ~7s, so it runs **only** after
 something has already failed, at most once per run; a clean run never pays for it.
 
-Whenever a stage produces no extractable report, its raw transcript is copied into a
-per-run `mktemp -d` directory (mode 700) and the path is logged. Everything else the script
-writes is a temp file removed on exit, and a blank stage prints nothing, so without this copy
-there is no way to tell a model that said nothing from a de-noiser that ate the report. **If
-a run reports a blank stage, read that file before concluding the model was silent.**
+Whenever a stage produces no report, its raw event stream — and its stderr, which is captured
+separately since it is not JSON — is copied into a per-run `mktemp -d` directory (mode 700) and
+the path logged. Everything else the script writes lives in a private work directory removed on
+exit, and a blank stage prints nothing. **If a run reports a blank stage, read that file**: the
+`tool_use` events show exactly what the model was doing when it stopped.
 
 ## What to do with the report
 
@@ -218,6 +239,9 @@ common cause on their own:
   The defaults name `opencode-go/*` models, which assumes an OpenCode Go plan; on a setup
   without one, point `OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL` at models from
   `opencode models`, or set `OPENCODE_REVIEW_PROVIDER` if the same models sit behind a router.
+- **`jq` or `python3` is on `PATH`** — one of them reads opencode's JSON events. Checked at
+  startup, so a missing reader fails immediately with that message rather than as four empty
+  stages.
 - The persona files exist in this skill directory (shipped with the skill):
   `prompts/swe.md`, `prompts/architect.md`, `prompts/chair.md`, `prompts/factcheck.md`, and
   the file-type checklists under `prompts/rules/`.
@@ -228,6 +252,10 @@ common cause on their own:
 - Driven by `--model` (not `--agent`): self-contained (no config dependency) and avoids the
   `mode:subagent`-as-top-level self-replication fork bomb.
 - `--pure` skips external plugins, so startup is lean and there's no port to collide on.
+- `--format json` makes the report recoverable at all: the model's prose, tool output and stop
+  reason arrive as separate typed events instead of as lines in a rendered transcript that had
+  to be told apart afterwards. stderr is captured to its own file rather than merged, since it
+  is not JSON and would otherwise interleave unparseable lines into the event stream.
 - `OPENCODE_PERMISSION` is set **for this run only** — it is merged with the saved config
   rather than substituted for it, and the saved config is not modified. `edit` is denied, and
   bash is **default-deny with a read-only allow-list** (git reads plus
