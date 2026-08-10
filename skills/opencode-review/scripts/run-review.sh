@@ -732,23 +732,24 @@ diagnose_models() { # $@ = the model ids whose stages failed
 # this is applied to text known to be the model's own words, not to a guess.
 REPORT_MIN_BYTES=40
 
-# Where a transcript is kept when no report could be extracted from it, so the
-# next occurrence can be diagnosed instead of guessed at. Every other copy is a
-# mktemp file removed on exit, and a blank stage prints nothing — without this
-# there is no way to tell "the model said nothing" from "the de-noiser ate it".
+# Where a stage's event stream is kept when no report could be extracted from it,
+# so the next occurrence can be diagnosed instead of guessed at. Everything else
+# lives in WORK_DIR and is removed on exit, and a blank stage prints nothing —
+# without this copy there is no way to see what the model was doing when it
+# stopped, which the tool_use events show exactly.
 #
 # The directory is created by mktemp -d on first use: atomically, mode 700, under
 # an unpredictable name. A fixed name under a shared /tmp would let a local user
 # pre-place a path there — clobbering the evidence, or, since cp follows a
-# destination symlink, diverting a transcript that contains the diff under review.
+# destination symlink, diverting events that contain the diff under review.
 KEEP_DIR=""
 
-# retain_transcript <transcript> <stage-label> -> sets KEPT_PATH ("" if not kept).
-# Skips an empty transcript: there is nothing in it to diagnose. Assigns rather
+# retain_events <file> <stage-label> -> sets KEPT_PATH ("" if not kept).
+# Skips an empty file: there is nothing in it to diagnose. Assigns rather
 # than prints so KEEP_DIR survives — a command substitution would subshell it
 # away and every stage would make its own directory.
 KEPT_PATH=""
-retain_transcript() {
+retain_events() {
   KEPT_PATH=""
   [ -s "$1" ] || return 0
   if [ -z "$KEEP_DIR" ]; then
@@ -765,7 +766,13 @@ retain_transcript() {
 # assistant message, already whole, not streamed fragments.
 json_text() {
   if [ "$JSON_BIN" = "jq" ]; then
-    jq -rj 'select(.type == "text") | .part.text // empty' <"$1" 2>/dev/null
+    # -R reads each line as a raw string and `fromjson?` drops the ones that do
+    # not parse. Without -R, jq parses the file as a JSON stream and ABORTS at
+    # the first malformed line — exiting 0 having silently discarded everything
+    # after it, so one stray line on stdout would truncate a report mid-sentence
+    # or below the size floor. The python3 branch below always skipped bad lines;
+    # this is what makes the two agree.
+    jq -Rrj 'fromjson? | select(.type == "text") | .part.text // empty' <"$1" 2>/dev/null
   else
     python3 -c '
 import json, sys
@@ -790,7 +797,11 @@ with open(sys.argv[1], "r", errors="replace") as f:
 # model stopped: "stop" when it chose to, "tool-calls" when it was still working.
 json_stats() {
   if [ "$JSON_BIN" = "jq" ]; then
-    jq -rs '
+    # -Rn with `inputs` for the same reason as json_text: slurping (-s) makes one
+    # malformed line fail the whole parse, which would report a model that spoke
+    # as having produced nothing at all.
+    jq -Rrn '
+      [inputs | fromjson?] |
       [ (map(select(.type == "text")) | length),
         (map(select(.type == "tool_use")) | length),
         ((map(select(.type == "step_finish")) | last | .part.reason) // "none")
@@ -840,7 +851,7 @@ report_bytes() { LC_ALL=C tr -d '[:space:]' <"$1" | wc -c | tr -d ' '; }
 # the work and then declined to write it up. Callers surface it.
 STAGE_STOP=""
 extract_report() {
-  local in="$1" out="$2" stage="${3:-stage}" bytes stats texts tools reason errsz
+  local in="$1" out="$2" stage="${3:-stage}" bytes stats texts tools reason errsz kept_events kept_err
 
   STAGE_STOP=""
   json_text "$in" >"$out"
@@ -863,20 +874,30 @@ extract_report() {
   [ "$bytes" -ge "$REPORT_MIN_BYTES" ] && return 0
 
   : >"$out"
-  retain_transcript "$in" "$stage"
-  [ -s "${in}.err" ] && retain_transcript "${in}.err" "${stage}.stderr"
+  # Order matters and the result must be captured immediately: retain_events
+  # clears KEPT_PATH on entry, so retaining stderr second would blank or replace
+  # the events path that the WARN below is meant to point at. The events file is
+  # the useful one — it holds the tool calls showing what the model was doing.
+  retain_events "$in" "$stage"
+  kept_events="$KEPT_PATH"
+  kept_err=""
+  if [ -s "${in}.err" ]; then
+    retain_events "${in}.err" "${stage}.stderr"
+    kept_err="$KEPT_PATH"
+  fi
+  KEPT_PATH="$kept_events"
 
   # A model that made tool calls and then stopped is the case issue #33 is about:
   # it read the diff, investigated, and ended its turn with nothing written. Say
   # that plainly instead of reporting it the same way as a run that never started.
   if [ "$tools" -gt 0 ] && [ "$texts" -eq 0 ]; then
     STAGE_STOP="stopped after ${tools} tool calls without writing anything (reason=${reason})"
-    log "WARN: ${stage}: ${STAGE_STOP}. Events: $(wc -c <"$in" | tr -d ' ') B. Kept: ${KEPT_PATH:-<empty, not kept>}"
+    log "WARN: ${stage}: ${STAGE_STOP}. Events: $(wc -c <"$in" | tr -d ' ') B kept at ${kept_events:-<none>}${kept_err:+, stderr at $kept_err}"
   else
     errsz=0
     [ -f "${in}.err" ] && errsz="$(wc -c <"${in}.err" | tr -d ' ')"
     STAGE_STOP="produced no usable report (${texts} text events, ${tools} tool calls, reason=${reason})"
-    log "WARN: ${stage}: ${STAGE_STOP}. Events: $(wc -c <"$in" | tr -d ' ') B, stderr: ${errsz} B. Kept: ${KEPT_PATH:-<empty, not kept>}"
+    log "WARN: ${stage}: ${STAGE_STOP}. Events: $(wc -c <"$in" | tr -d ' ') B kept at ${kept_events:-<none>}, stderr ${errsz} B${kept_err:+ kept at $kept_err}"
   fi
   return 2
 }
@@ -917,8 +938,9 @@ if [ -n "$SINGLE_AGENT" ]; then
   echo "===== OPENCODE REVIEW (agent ${SINGLE_AGENT}) — ${SCOPE} ====="
   oc_run --agent "$SINGLE_AGENT" "$MSG" "$single_out"
   st=$?
-  # A pre-configured agent has its own prompt and cannot be told to fence, so a
-  # missing fence here is expected; the de-noising still applies.
+  # A pre-configured agent carries its own prompt and is never told this script's
+  # output rules — which costs nothing now: its `text` events are its report the
+  # same as any other stage's, with no cooperation required.
   extract_report "$single_out" "$single_rep" "single-agent"
   ex=$?
   single_stop="$STAGE_STOP"
@@ -1046,12 +1068,17 @@ absent=0
 [ "$arch_ex" -eq 2 ] && absent=$((absent + 1))
 if [ "$absent" -gt 0 ]; then
   printf '\n---\n\n**DEGRADED: %d of 2 members produced no report.** ' "$absent"
-  if [ "$absent" -eq 2 ]; then
+  # The chair's own state decides what is true here. Claiming a solo chair
+  # judgment when the chair also produced nothing would describe output that
+  # does not exist — above would be two empty member sections.
+  if [ "$absent" -eq 2 ] && [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ]; then
     printf 'Nothing above is a committee finding — it is a solo judgment by the chair model, which read the diff itself. '
+  elif [ "$absent" -eq 2 ]; then
+    printf 'The chair produced nothing either, so there is no review above at all — every stage failed. '
   else
     printf 'One perspective is missing from everything above. '
   fi
-  printf 'See the [opencode-review] WARN lines on stderr for what each absent member did before stopping.\n'
+  printf 'See the [opencode-review] WARN lines on stderr for what each absent stage did before stopping.\n'
 fi
 echo "===== END OF REVIEW ====="
 
