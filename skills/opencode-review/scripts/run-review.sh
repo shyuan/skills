@@ -598,18 +598,55 @@ status_note() {
 # `opencode models` costs about 7s, so it never runs on the happy path — only
 # once, after something has already failed, where the cost does not matter.
 # Memoised because several stages fail together in exactly that case.
+# `opencode models` is itself a network-touching call, and this runs on the path
+# where something has already gone wrong — so it gets its own short timeout.
+# Without one, a provider that hangs would hang the diagnosis too, outliving the
+# run it exists to explain.
+DIAG_TIMEOUT=30
 DIAG_DONE=0
 diagnose_models() { # $@ = the model ids whose stages failed
   [ "$DIAG_DONE" -eq 1 ] && return 0
   DIAG_DONE=1
 
-  local avail missing="" m
-  avail="$(opencode models 2>/dev/null)"
+  local avail rc missing="" m tmp pid wpid
+  if [ -n "$TIMEOUT_BIN" ]; then
+    avail="$("$TIMEOUT_BIN" "$DIAG_TIMEOUT" opencode models 2>/dev/null)"
+    rc=$?
+  else
+    # Same shape as oc_run's fallback watchdog, for a machine with no timeout(1).
+    tmp="$(mktemp 2>/dev/null || echo "/tmp/oc-diag.$$")"
+    opencode models >"$tmp" 2>/dev/null &
+    pid=$!
+    (
+      sleep "$DIAG_TIMEOUT"
+      kill -TERM "$pid" 2>/dev/null
+      sleep 3
+      kill -KILL "$pid" 2>/dev/null
+    ) &
+    wpid=$!
+    wait "$pid" 2>/dev/null
+    rc=$?
+    kill "$wpid" 2>/dev/null
+    wait "$wpid" 2>/dev/null
+    avail="$(cat "$tmp" 2>/dev/null)"
+    rm -f "$tmp"
+  fi
+
+  # A non-zero exit can still leave partial output on stdout; judging model
+  # access from a truncated listing would invent missing models. Bail instead.
+  if [ "$rc" -ne 0 ]; then
+    log "diag  : 'opencode models' failed (status ${rc}), so model access could not be checked."
+    return 0
+  fi
   if [ -z "$avail" ]; then
     log "diag  : 'opencode models' returned nothing, so model access could not be checked."
     return 0
   fi
 
+  # Exact whole-line match. Verified against the real command: one id per line,
+  # no header, no ANSI once stdout is a pipe, and — the part that matters for a
+  # routed setup — ids carry their provider prefix verbatim, so the prefixed
+  # `omniroute/opencode-go/glm-5.2` this script builds is exactly what is listed.
   for m in "$@"; do
     [ -n "$m" ] || continue
     printf '%s\n' "$avail" | grep -qxF -- "$m" || missing="${missing} ${m}"
