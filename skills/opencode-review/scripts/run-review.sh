@@ -7,10 +7,11 @@
 # Claude Code to consume.
 #
 # Self-contained = the skill ships everything: it drives opencode by MODEL
-# (`opencode run --pure --model <id>`), embedding each reviewer's persona (from
-# ./prompts/*.md) into the message. It does NOT depend on agents being defined
-# in the user's opencode.jsonc. The only environment requirement is that the
-# chosen models are authenticated in OpenCode (model access, not config).
+# (`opencode run --pure --format json --model <id>`), embedding each reviewer's
+# persona (from ./prompts/*.md) into the message. It does NOT depend on agents
+# being defined in the user's opencode.jsonc. The environment requirements are
+# that the chosen models are authenticated in OpenCode (model access, not
+# config), and that jq or python3 is present to read the JSON event stream.
 #
 # Claude Code (the caller) is the lead/orchestrator: it fans out to two members
 # in parallel, then hands both reports to the chair:
@@ -92,33 +93,25 @@ STAGGER="${OPENCODE_REVIEW_STAGGER:-3}"
 
 log() { printf '[opencode-review] %s\n' "$*" >&2; }
 
-# ---------------------------------------------------------------- report fence
-# Each persona fences its report between these markers and every stage forwards
-# only what is between them (see "report extraction" below).
-#
-# The markers carry a per-run nonce because the fence is allowed to outrank the
-# render state machine, so anything that can emit a marker line controls what is
-# taken as the report. The repository under review can emit one: the personas
-# tell members to read related files, `cat`/`head`/`tail` are permitted and print
-# file content verbatim, and the diff under review is untrusted input. A fixed
-# marker would also break on this repo, whose own prompts/*.md contain the
-# literal token. A nonce the reviewed tree cannot know closes both.
-#
-# prompts/*.md carry the bare token; read_prompt substitutes the nonced form, so
-# the persona files stay readable and there is one source of truth for the value.
-REPORT_TOKEN_BEGIN='<<<REVIEW-REPORT>>>'
-REPORT_TOKEN_END='<<<END-REVIEW-REPORT>>>'
-REPORT_NONCE="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-[ -n "$REPORT_NONCE" ] || REPORT_NONCE="$$$(date +%s)"
-REPORT_BEGIN="<<<REVIEW-REPORT-${REPORT_NONCE}>>>"
-REPORT_END="<<<END-REVIEW-REPORT-${REPORT_NONCE}>>>"
-
 # ----------------------------------------------------------------- pre-flight
 command -v opencode >/dev/null 2>&1 ||
   {
     log "ERROR: 'opencode' is not on PATH."
     exit 127
   }
+
+# Stages run with `--format json`, so a JSON reader is required. jq is preferred
+# and python3 is the fallback; both are checked here rather than at first use so
+# a machine with neither fails before spending a model call on it.
+JSON_BIN=""
+if command -v jq >/dev/null 2>&1; then
+  JSON_BIN="jq"
+elif command -v python3 >/dev/null 2>&1; then
+  JSON_BIN="python3"
+else
+  log "ERROR: neither 'jq' nor 'python3' is on PATH; one is needed to read opencode's JSON events."
+  exit 127
+fi
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
   {
     log "ERROR: not inside a git repository (cwd=$(pwd))."
@@ -132,13 +125,12 @@ elif command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_BIN="gtimeout"
 fi
 
-read_prompt() { # $1 file -> persona text, fence markers nonced (fatal if missing)
+read_prompt() { # $1 file -> persona text (fatal if missing)
   [ -f "$1" ] || {
     log "ERROR: prompt file missing: $1"
     exit 1
   }
-  sed -e "s|${REPORT_TOKEN_END}|${REPORT_END}|g" \
-    -e "s|${REPORT_TOKEN_BEGIN}|${REPORT_BEGIN}|g" "$1"
+  cat "$1"
 }
 
 # ---------------------------------------------------------- choose the target
@@ -558,11 +550,23 @@ single_rep="$WORK_DIR/single.rep"
 
 # oc_run <flag> <value> <message> <outfile>
 # Runs one opencode invocation headlessly (flag is --model or --agent), capturing
-# BOTH streams to <outfile> (opencode emits the report on its render stream, not
-# its final stdout). What lands in <outfile> is therefore a transcript — run it
-# through extract_report before showing it to anyone. Honors a hard timeout via
-# timeout(1) when present, else a built-in watchdog so a hung run can't block
-# forever. Returns the exit status (124 on timeout).
+# its JSON event stream to <outfile>, one event per line.
+#
+# `--format json` is what makes the report recoverable at all. The default format
+# is a rendered transcript in which the model's prose, tool output, tool errors
+# and ANSI control sequences are all just lines, and telling them apart after the
+# fact was guesswork that got it wrong in both directions (see extract_report).
+# The JSON stream separates them at the source: `text` events are the model's own
+# words, `tool_use` events carry every byte a tool produced, and step_finish
+# carries the reason the model stopped.
+#
+# stderr goes to its own file rather than being merged: it is not JSON, so
+# merging it would put unparseable lines in the middle of the event stream. It is
+# kept rather than discarded because it is where opencode reports the failures
+# that produce no events at all.
+#
+# Honors a hard timeout via timeout(1) when present, else a built-in watchdog so a
+# hung run can't block forever. Returns the exit status (124 on timeout).
 #
 # stdin is /dev/null: with stdin left attached, `opencode run` waits on it and the
 # run hangs until the timeout fires, having produced no output at all.
@@ -570,11 +574,12 @@ oc_run() {
   local flag="$1" val="$2" msg="$3" out="$4" st td pid wpid
   if [ -n "$TIMEOUT_BIN" ]; then
     GIT_PAGER=cat GH_PAGER=cat PAGER=cat OPENCODE_PERMISSION="$PERM" \
-      "$TIMEOUT_BIN" "$TIMEOUT" opencode run --pure "$flag" "$val" "$msg" </dev/null >"$out" 2>&1
+      "$TIMEOUT_BIN" "$TIMEOUT" opencode run --pure --format json "$flag" "$val" "$msg" \
+      </dev/null >"$out" 2>"${out}.err"
     return $?
   fi
   GIT_PAGER=cat GH_PAGER=cat PAGER=cat OPENCODE_PERMISSION="$PERM" \
-    opencode run --pure "$flag" "$val" "$msg" </dev/null >"$out" 2>&1 &
+    opencode run --pure --format json "$flag" "$val" "$msg" </dev/null >"$out" 2>"${out}.err" &
   pid=$!
   # Timeout sentinel: the watchdog creates this path to signal that it fired, so
   # its EXISTENCE is the signal and it starts out deleted.
@@ -702,35 +707,49 @@ diagnose_models() { # $@ = the model ids whose stages failed
 }
 
 # ------------------------------------------------------------ report extraction
-# What oc_run captures is a TRANSCRIPT, not a report: opencode renders tool-call
-# headers, tool output (including an echo of the whole diff, once per member),
-# ANSI escapes, and — on every denied bash call — the entire OPENCODE_PERMISSION
-# ruleset as JSON. Handing that to the next stage is what stalled the chair: it
-# received 60-78 KB of render noise and had to find the reports inside it.
+# A stage's report is the model's own prose, and the JSON event stream says which
+# bytes those are: `text` events and nothing else. Tool output, tool errors, the
+# OPENCODE_PERMISSION dump printed on every denied bash call, and the model's
+# reading of the diff all arrive as `tool_use` events and are never candidates.
 #
-# So every persona fences its report (REPORT_BEGIN/REPORT_END, defined up top with
-# the reasoning for the nonce), and each stage passes on only what is between them.
-# Below this many non-whitespace BYTES (CJK runs ~3/char) an "extracted report" is
-# a stray heading or a courtesy line, not a report; the stage is reported as blank.
+# This replaces a fence the personas had to emit plus a de-noiser that inferred
+# structure from rendered output. Both failed, in both directions. Models that
+# investigated for 30-70 KB and then stopped left nothing fenced, so the fallback
+# ran and forwarded whatever the state machine had last seen: one run handed the
+# chair 150 bytes of a shell error message as the SWE report, another 99 bytes of
+# a model's opening narration as the architect's — each reported `ok, but the
+# report was not fenced`, which reads as a formatting nit rather than "this is
+# not a review". Reading `text` events makes that class unrepresentable: tool
+# output cannot be mistaken for prose when it never shares a channel with it.
+#
+# It also retires the per-run nonce. That existed because a fence line was
+# authoritative wherever it appeared, and members read repository files with cat,
+# so the tree under review could forge one. File content is now tool output by
+# construction and cannot reach the report at all.
+#
+# Below this many non-whitespace BYTES (CJK runs ~3/char) the model's prose is a
+# courtesy line or a narration fragment, not a report. Unlike the old threshold
+# this is applied to text known to be the model's own words, not to a guess.
 REPORT_MIN_BYTES=40
 
-# Where a transcript is kept when no report could be extracted from it, so the
-# next occurrence can be diagnosed instead of guessed at. Every other copy is a
-# mktemp file removed on exit, and a blank stage prints nothing — without this
-# there is no way to tell "the model said nothing" from "the de-noiser ate it".
+# Where a stage's event stream is kept when no report could be extracted from it,
+# so the next occurrence can be diagnosed instead of guessed at. Everything else
+# lives in WORK_DIR and is removed on exit, and a blank stage prints nothing —
+# without this copy there is no way to see what the model was doing when it
+# stopped, which the tool_use events show exactly.
 #
 # The directory is created by mktemp -d on first use: atomically, mode 700, under
 # an unpredictable name. A fixed name under a shared /tmp would let a local user
 # pre-place a path there — clobbering the evidence, or, since cp follows a
-# destination symlink, diverting a transcript that contains the diff under review.
+# destination symlink, diverting events that contain the diff under review.
 KEEP_DIR=""
 
-# retain_transcript <transcript> <stage-label> -> sets KEPT_PATH ("" if not kept).
-# Skips an empty transcript: there is nothing in it to diagnose. Assigns rather
+# retain_events <file> <stage-label> -> sets KEPT_PATH ("" if not kept).
+# Skips an empty file: there is nothing in it to diagnose. Assigns rather
 # than prints so KEEP_DIR survives — a command substitution would subshell it
 # away and every stage would make its own directory.
 KEPT_PATH=""
-retain_transcript() {
+retain_events() {
   KEPT_PATH=""
   [ -s "$1" ] || return 0
   if [ -z "$KEEP_DIR" ]; then
@@ -740,66 +759,77 @@ retain_transcript() {
   cp "$1" "$KEEP_DIR/$2.log" 2>/dev/null && KEPT_PATH="$KEEP_DIR/$2.log"
 }
 
-# denoise <transcript>
-# Prints the report on stdout; exits 0 if it came from between the fences, 1 if
-# the fences were absent and the de-noised transcript was used instead.
-#
-# De-noising uses opencode's own render structure: a line starting with ESC is
-# either a bare separator, a tool header, or an error banner; the plain lines
-# after a tool header are that tool's output. A separator ends the tool block.
-#
-# An error banner also ends it, but what follows the banner differs by error:
-#   - a denied bash call puts its whole ruleset on the banner line, and the
-#     model's prose resumes on the next line with no separator of its own;
-#   - a malformed provider response (e.g. a payload carrying neither `choices`
-#     nor `error`) spills a multi-line Zod validation dump below the banner.
-# So after a banner we skip continuation lines that look like structured-error
-# spill — brackets, quoted keys, "Error message:" — and treat the first line that
-# does not as the model's prose.
-denoise() {
-  awk -v b="$REPORT_BEGIN" -v e="$REPORT_END" '
-    BEGIN { esc = sprintf("%c", 27); csi = esc "\\[[0-9;?]*[a-zA-Z]"; state = "prose"; n = 0 }
-    {
-      isesc = (substr($0, 1, 1) == esc)
-      line = $0
-      gsub(csi, "", line)
-      sub("\r$", "", line)
-      if (isesc) {
-        if (line == "") { state = "prose"; next }
-        if (line ~ /^Error: /) { state = "errspill"; next }
-        state = "tool"; next
-      }
-      # The fence is unambiguous, so it outranks the state machine. This matters:
-      # a tool call that renders no output block (Read) is not followed by a
-      # separator, so when it is the last call the report starts on the very next
-      # line and would otherwise be swallowed as more output from that tool.
-      t = line
-      gsub(/^[ \t]+|[ \t]+$/, "", t)
-      if (t == b) state = "prose"
-      if (state == "tool") next
-      if (state == "errspill") {
-        if (line ~ /^[ \t]*([][{}"]|Error message:)/ || line ~ /^[ \t]*$/) next
-        state = "prose"
-      }
-      if (line ~ /^> [a-zA-Z0-9_.-]+ · /) next   # opencode banner: "> build · <model>"
-      buf[++n] = line
-    }
-    END {
-      nb = 0
-      for (i = 1; i <= n; i++) { t = buf[i]; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t == b) nb = i }
-      if (nb > 0) {
-        ne = n + 1
-        for (i = nb + 1; i <= n; i++) { t = buf[i]; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t == e) { ne = i; break } }
-        lo = nb + 1; hi = ne - 1; rc = 0
-      } else {
-        lo = 1; hi = n; rc = 1
-      }
-      while (lo <= hi && buf[lo] ~ /^[ \t]*$/) lo++          # trim blank edges
-      while (hi >= lo && buf[hi] ~ /^[ \t]*$/) hi--
-      for (i = lo; i <= hi; i++) print buf[i]
-      exit rc
-    }
-  ' "$1"
+# json_text <events> -> the model's prose on stdout, text events in order.
+# Unparseable lines are skipped rather than fatal: stderr has its own file, but a
+# provider can still put a stray line on stdout, and one bad line must not cost
+# the whole report. Parts are concatenated raw — opencode emits one event per
+# assistant message, already whole, not streamed fragments.
+json_text() {
+  if [ "$JSON_BIN" = "jq" ]; then
+    # -R reads each line as a raw string and `fromjson?` drops the ones that do
+    # not parse. Without -R, jq parses the file as a JSON stream and ABORTS at
+    # the first malformed line — exiting 0 having silently discarded everything
+    # after it, so one stray line on stdout would truncate a report mid-sentence
+    # or below the size floor. The python3 branch below always skipped bad lines;
+    # this is what makes the two agree.
+    jq -Rrj 'fromjson? | select(.type == "text") | .part.text // empty' <"$1" 2>/dev/null
+  else
+    python3 -c '
+import json, sys
+with open(sys.argv[1], "r", errors="replace") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("type") == "text":
+            sys.stdout.write((d.get("part") or {}).get("text") or "")
+' "$1" 2>/dev/null
+  fi
+}
+
+# json_stats <events> -> "<text-events> <tool-calls> <last-step-finish-reason>"
+# Describes what the stage did, so a stage that produced no report can be told
+# apart from one that never ran. `reason` is opencode's own word for why the
+# model stopped: "stop" when it chose to, "tool-calls" when it was still working.
+json_stats() {
+  if [ "$JSON_BIN" = "jq" ]; then
+    # -Rn with `inputs` for the same reason as json_text: slurping (-s) makes one
+    # malformed line fail the whole parse, which would report a model that spoke
+    # as having produced nothing at all.
+    jq -Rrn '
+      [inputs | fromjson?] |
+      [ (map(select(.type == "text")) | length),
+        (map(select(.type == "tool_use")) | length),
+        ((map(select(.type == "step_finish")) | last | .part.reason) // "none")
+      ] | @tsv' <"$1" 2>/dev/null
+  else
+    python3 -c '
+import json, sys
+t = u = 0
+reason = "none"
+with open(sys.argv[1], "r", errors="replace") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        k = d.get("type")
+        if k == "text":
+            t += 1
+        elif k == "tool_use":
+            u += 1
+        elif k == "step_finish":
+            reason = (d.get("part") or {}).get("reason") or reason
+print("%d\t%d\t%s" % (t, u, reason))
+' "$1" 2>/dev/null
+  fi
 }
 
 # report_bytes <file> -> non-whitespace byte count.
@@ -807,41 +837,84 @@ denoise() {
 # count is all this needs, and bytewise deletion cannot choke on a UTF-8 lead.
 report_bytes() { LC_ALL=C tr -d '[:space:]' <"$1" | wc -c | tr -d ' '; }
 
-# extract_report <transcript> <outfile> [stage-label]
+# extract_report <events> <outfile> [stage-label]
 # Writes the stage's report to <outfile>. Exit status:
-#   0  fenced report found — this is the good path
-#   1  no fence; a de-noised transcript was written instead (model ignored the
-#      format instruction — still far smaller than the raw capture)
-#   2  nothing substantive — the stage produced no report
+#   0  the model produced prose — this is the good path
+#   2  no report: either it never spoke, or what it said is too short to be one
 #
-# There is deliberately no "recover it anyway" pass here. Dropping the tool-output
-# rule does salvage a report the de-noiser swallowed, but it cannot tell that
-# report from tool output, so a model that runs git diff and then stops gets its
-# own diff forwarded as its review and the run is called ok — which is precisely
-# the failure the blank check exists to catch. A fenced report is already immune
-# (the fence outranks the state machine, above); an unfenced one has no anchor to
-# recover from, so it is reported blank and its transcript is kept to be read.
+# The old status 1 ("unfenced, de-noised transcript used") is gone. It existed
+# only because the fallback could not tell prose from tool output; there is no
+# such fallback now, so a stage either produced text or it did not.
+#
+# STAGE_STOP is set to a description when the model ran and stopped without
+# reporting, which is a different failure from a silent or timed-out run: it did
+# the work and then declined to write it up. Callers surface it.
+STAGE_STOP=""
 extract_report() {
-  local in="$1" out="$2" stage="${3:-stage}" rc bytes
+  local in="$1" out="$2" stage="${3:-stage}" bytes stats texts tools reason errsz kept_events kept_err
 
-  denoise "$in" >"$out"
-  rc=$?
+  STAGE_STOP=""
+  json_text "$in" >"$out"
+  # Text parts are concatenated exactly as the model wrote them, and a model
+  # rarely ends on a newline — without one, whatever the caller prints next runs
+  # onto the report's last line (the END OF REVIEW marker did precisely that).
+  # In a command substitution a trailing newline is stripped, so a non-empty
+  # result here means the last byte was not one.
+  [ -s "$out" ] && [ -n "$(tail -c1 "$out")" ] && printf '\n' >>"$out"
   bytes="$(report_bytes "$out")"
-  [ "$bytes" -ge "$REPORT_MIN_BYTES" ] && return "$rc"
+
+  stats="$(json_stats "$in")"
+  texts="$(printf '%s' "$stats" | cut -f1)"
+  tools="$(printf '%s' "$stats" | cut -f2)"
+  reason="$(printf '%s' "$stats" | cut -f3)"
+  [ -n "$texts" ] || texts=0
+  [ -n "$tools" ] || tools=0
+  [ -n "$reason" ] || reason=none
+
+  [ "$bytes" -ge "$REPORT_MIN_BYTES" ] && return 0
 
   : >"$out"
-  retain_transcript "$in" "$stage"
-  log "WARN: ${stage}: no report could be extracted from $(wc -c <"$in" | tr -d ' ') B of transcript. Transcript: ${KEPT_PATH:-<empty, not kept>}"
+  # Order matters and the result must be captured immediately: retain_events
+  # clears KEPT_PATH on entry, so retaining stderr second would blank or replace
+  # the events path that the WARN below is meant to point at. The events file is
+  # the useful one — it holds the tool calls showing what the model was doing.
+  retain_events "$in" "$stage"
+  kept_events="$KEPT_PATH"
+  kept_err=""
+  if [ -s "${in}.err" ]; then
+    retain_events "${in}.err" "${stage}.stderr"
+    kept_err="$KEPT_PATH"
+  fi
+  KEPT_PATH="$kept_events"
+
+  # A model that made tool calls and then stopped is the case issue #33 is about:
+  # it read the diff, investigated, and ended its turn with nothing written. Say
+  # that plainly instead of reporting it the same way as a run that never started.
+  if [ "$tools" -gt 0 ] && [ "$texts" -eq 0 ]; then
+    STAGE_STOP="stopped after ${tools} tool calls without writing anything (reason=${reason})"
+    log "WARN: ${stage}: ${STAGE_STOP}. Events: $(wc -c <"$in" | tr -d ' ') B kept at ${kept_events:-<none>}${kept_err:+, stderr at $kept_err}"
+  else
+    errsz=0
+    [ -f "${in}.err" ] && errsz="$(wc -c <"${in}.err" | tr -d ' ')"
+    STAGE_STOP="produced no usable report (${texts} text events, ${tools} tool calls, reason=${reason})"
+    log "WARN: ${stage}: ${STAGE_STOP}. Events: $(wc -c <"$in" | tr -d ' ') B kept at ${kept_events:-<none>}, stderr ${errsz} B${kept_err:+ kept at $kept_err}"
+  fi
   return 2
 }
 
-# stage_note <run-exit-status> <extract-status> -> the label shown in the log and
-# handed to the chair, so "exited 0 having written nothing" can no longer read ok.
+# stage_note <run-exit-status> <extract-status> [stop-description] -> the label
+# shown in the log and handed to the chair, so "exited 0 having written nothing"
+# can no longer read ok.
 stage_note() {
   case "$2" in
   0) status_note "$1" ;;
-  1) printf '%s, but the report was not fenced — de-noised transcript used' "$(status_note "$1")" ;;
-  *) printf 'NO REPORT PRODUCED (run %s)' "$(status_note "$1")" ;;
+  *)
+    if [ -n "${3:-}" ]; then
+      printf 'NO REPORT PRODUCED — %s (run %s)' "$3" "$(status_note "$1")"
+    else
+      printf 'NO REPORT PRODUCED (run %s)' "$(status_note "$1")"
+    fi
+    ;;
   esac
 }
 
@@ -865,13 +938,15 @@ if [ -n "$SINGLE_AGENT" ]; then
   echo "===== OPENCODE REVIEW (agent ${SINGLE_AGENT}) — ${SCOPE} ====="
   oc_run --agent "$SINGLE_AGENT" "$MSG" "$single_out"
   st=$?
-  # A pre-configured agent has its own prompt and cannot be told to fence, so a
-  # missing fence here is expected; the de-noising still applies.
+  # A pre-configured agent carries its own prompt and is never told this script's
+  # output rules — which costs nothing now: its `text` events are its report the
+  # same as any other stage's, with no cooperation required.
   extract_report "$single_out" "$single_rep" "single-agent"
   ex=$?
+  single_stop="$STAGE_STOP"
   cat "$single_rep"
   echo "===== END OF REVIEW ====="
-  log "single-agent review: $(stage_note "$st" "$ex")"
+  log "single-agent review: $(stage_note "$st" "$ex" "$single_stop")"
   # No model to check here — the agent carries its own. The equivalent trap is
   # config-shaped, so state it rather than checking it.
   { [ "$st" -ne 0 ] || [ "$ex" -eq 2 ]; } &&
@@ -889,9 +964,10 @@ if [ -n "$SINGLE_MODEL" ]; then
   st=$?
   extract_report "$single_out" "$single_rep" "single-model"
   ex=$?
+  single_stop="$STAGE_STOP"
   cat "$single_rep"
   echo "===== END OF REVIEW ====="
-  log "single-model review: $(stage_note "$st" "$ex")"
+  log "single-model review: $(stage_note "$st" "$ex" "$single_stop")"
   { [ "$st" -ne 0 ] || [ "$ex" -eq 2 ]; } && diagnose_models "$SINGLE_MODEL"
   [ "$st" -eq 0 ] && [ "$ex" -eq 2 ] && st=1
   exit "$st"
@@ -922,9 +998,11 @@ wait "$arch_job"
 arch_st=$?
 extract_report "$swe_out" "$swe_rep" "swe"
 swe_ex=$?
+swe_stop="$STAGE_STOP"
 extract_report "$arch_out" "$arch_rep" "architect"
 arch_ex=$?
-log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex"), architect=$(stage_note "$arch_st" "$arch_ex")"
+arch_stop="$STAGE_STOP"
+log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex" "$swe_stop"), architect=$(stage_note "$arch_st" "$arch_ex" "$arch_stop")"
 
 # Phase 2 — the chair dedupes/verifies both reports against the same target. It
 # receives the extracted reports, which is what prompts/chair.md says it will get;
@@ -933,19 +1011,21 @@ log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex"), architect=$(stage_note
 log "phase 2: chair (synthesis)"
 chair_msg="$(printf '%s\n\n===== SWE report (correctness/bugs/security) [%s] =====\n%s\n\n===== Architect report (design/architecture) [%s] =====\n%s\n\n===== review target =====\n%s\n' \
   "$CHAIR_PERSONA" \
-  "$(stage_note "$swe_st" "$swe_ex")" "$(cat "$swe_rep")" \
-  "$(stage_note "$arch_st" "$arch_ex")" "$(cat "$arch_rep")" \
+  "$(stage_note "$swe_st" "$swe_ex" "$swe_stop")" "$(cat "$swe_rep")" \
+  "$(stage_note "$arch_st" "$arch_ex" "$arch_stop")" "$(cat "$arch_rep")" \
   "$MSG")"
 log "phase 2: chair prompt is $(printf '%s' "$chair_msg" | wc -c | tr -d ' ') B (swe report $(wc -c <"$swe_rep" | tr -d ' ') B of $(wc -c <"$swe_out" | tr -d ' ') B captured, architect $(wc -c <"$arch_rep" | tr -d ' ') B of $(wc -c <"$arch_out" | tr -d ' ') B)"
 oc_run --model "$CHAIR_MODEL" "$chair_msg" "$chair_out"
 chair_st=$?
 extract_report "$chair_out" "$chair_rep" "chair"
 chair_ex=$?
+chair_stop="$STAGE_STOP"
 
 # Phase 3 (optional) — fact-check the chair's report against the diff only,
 # pruning findings the diff can directly falsify. On any failure the chair's
 # report is emitted unchanged, so this phase can only ever reduce false positives.
 fc_st=0
+fc_stop=""
 fc_ex=0
 fc_applied=0
 if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "0" ]; then
@@ -957,11 +1037,12 @@ if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "
   fc_st=$?
   extract_report "$fc_out" "$fc_rep" "factcheck"
   fc_ex=$?
+  fc_stop="$STAGE_STOP"
   if [ "$fc_st" -eq 0 ] && [ "$fc_ex" -ne 2 ]; then
     fc_applied=1
     log "phase 3 done: fact-check applied"
   else
-    log "WARN: fact-check $(stage_note "$fc_st" "$fc_ex"); emitting chair report unchanged."
+    log "WARN: fact-check $(stage_note "$fc_st" "$fc_ex" "$fc_stop"); emitting chair report unchanged."
   fi
 fi
 
@@ -970,11 +1051,34 @@ if [ "$fc_applied" -eq 1 ]; then
 elif [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ]; then
   cat "$chair_rep"
 else
-  log "WARN: chair $(stage_note "$chair_st" "$chair_ex"); falling back to the member reports."
-  printf '## SWE (correctness) [%s]\n\n' "$(stage_note "$swe_st" "$swe_ex")"
+  log "WARN: chair $(stage_note "$chair_st" "$chair_ex" "$chair_stop"); falling back to the member reports."
+  printf '## SWE (correctness) [%s]\n\n' "$(stage_note "$swe_st" "$swe_ex" "$swe_stop")"
   cat "$swe_rep"
-  printf '\n## Architect (design) [%s]\n\n' "$(stage_note "$arch_st" "$arch_ex")"
+  printf '\n## Architect (design) [%s]\n\n' "$(stage_note "$arch_st" "$arch_ex" "$arch_stop")"
   cat "$arch_rep"
+fi
+
+# How many members actually contributed. A chair report built on no members is
+# one model's opinion wearing a committee's shape — the diversity that justifies
+# the whole design is gone. The chair is told to note an absence and does, but
+# that lands in its preamble where a skimming reader misses it. This goes after
+# the report, inside the markers, so it is the last thing read.
+absent=0
+[ "$swe_ex" -eq 2 ] && absent=$((absent + 1))
+[ "$arch_ex" -eq 2 ] && absent=$((absent + 1))
+if [ "$absent" -gt 0 ]; then
+  printf '\n---\n\n**DEGRADED: %d of 2 members produced no report.** ' "$absent"
+  # The chair's own state decides what is true here. Claiming a solo chair
+  # judgment when the chair also produced nothing would describe output that
+  # does not exist — above would be two empty member sections.
+  if [ "$absent" -eq 2 ] && [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ]; then
+    printf 'Nothing above is a committee finding — it is a solo judgment by the chair model, which read the diff itself. '
+  elif [ "$absent" -eq 2 ]; then
+    printf 'The chair produced nothing either, so there is no review above at all — every stage failed. '
+  else
+    printf 'One perspective is missing from everything above. '
+  fi
+  printf 'See the [opencode-review] WARN lines on stderr for what each absent stage did before stopping.\n'
 fi
 echo "===== END OF REVIEW ====="
 
@@ -993,7 +1097,7 @@ fi
 if [ "$status" -eq 0 ]; then
   log "committee review complete."
 else
-  log "committee review finished with issues (chair=$(stage_note "$chair_st" "$chair_ex"), swe=$(stage_note "$swe_st" "$swe_ex"), architect=$(stage_note "$arch_st" "$arch_ex"))."
+  log "committee review finished with issues (chair=$(stage_note "$chair_st" "$chair_ex" "$chair_stop"), swe=$(stage_note "$swe_st" "$swe_ex" "$swe_stop"), architect=$(stage_note "$arch_st" "$arch_ex" "$arch_stop"))."
   # Only the models that actually failed, so the report names causes rather than
   # every model the run happened to mention.
   diag_models=""
