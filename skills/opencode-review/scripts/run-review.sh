@@ -614,7 +614,19 @@ diagnose_models() { # $@ = the model ids whose stages failed
     rc=$?
   else
     # Same shape as oc_run's fallback watchdog, for a machine with no timeout(1).
-    tmp="$(mktemp 2>/dev/null || echo "/tmp/oc-diag.$$")"
+    #
+    # No `|| echo /tmp/<fixed>.$$` fallback when mktemp fails, unlike the older
+    # temp files above. A predictable name under a shared /tmp can be pre-placed
+    # as a symlink by a local user, and this one is a redirection target, so the
+    # link would be followed and whatever it points at truncated — the same
+    # hazard KEEP_DIR is created with `mktemp -d` to avoid. This check is
+    # optional by nature, so when there is nowhere safe to write it is skipped
+    # and said, rather than made to work at that price.
+    tmp="$(mktemp 2>/dev/null)"
+    if [ -z "$tmp" ]; then
+      log "diag  : no timeout(1) and mktemp failed, so model access could not be checked."
+      return 0
+    fi
     opencode models >"$tmp" 2>/dev/null &
     pid=$!
     (
