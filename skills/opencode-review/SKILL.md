@@ -171,6 +171,26 @@ A stage that exits 0 having written **no** report is reported as
 chair — so `prompts/chair.md`'s "note which member is absent" rule can fire, and the run's
 exit status is non-zero. A run that yielded nothing can no longer look successful.
 
+**When a stage fails, the log also says whether the models were even available.** opencode
+gives no usable answer for a bad model id — `opencode run --model does-not-exist/at-all` exits
+**0** and prints a bare `UnknownError: "Unexpected server error"` that never mentions the
+model — so the script would otherwise report `NO REPORT PRODUCED (run ok)` for every stage with
+nothing pointing at the cause. This is the first thing anyone hits running the skill on a
+machine without the default provider. So on the failure path only, the run checks the failed
+stages' models against `opencode models`:
+
+```
+[opencode-review] diag  : NOT available in this OpenCode setup: opencode-go/kimi-k2.7-code …
+[opencode-review] diag  : that alone accounts for an empty report — opencode exits 0 on an
+                          unusable model id and reports only a generic server error.
+[opencode-review] diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,…}_MODEL,
+                          or set OPENCODE_REVIEW_PROVIDER=<id> if they sit behind a router.
+```
+
+When the models *are* all present it says so too — that rules out the most likely cause and
+points you at the transcript instead. `opencode models` costs ~7s, so it runs **only** after
+something has already failed, at most once per run; a clean run never pays for it.
+
 Whenever a stage produces no extractable report, its raw transcript is copied into a
 per-run `mktemp -d` directory (mode 700) and the path is logged. Everything else the script
 writes is a temp file removed on exit, and a blank stage prints nothing, so without this copy
@@ -190,10 +210,14 @@ a run reports a blank stage, read that file before concluding the model was sile
 
 ## Prerequisites
 
-These are already true in the user's environment; only check them if the run fails:
+Only check these if the run fails — and check the `diag :` lines first, which report the most
+common cause on their own:
 
 - `opencode` is on `PATH`, with the chosen models authenticated (same providers as the TUI).
   Only **model access** is required — no committee agents need to exist in `opencode.jsonc`.
+  The defaults name `opencode-go/*` models, which assumes an OpenCode Go plan; on a setup
+  without one, point `OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL` at models from
+  `opencode models`, or set `OPENCODE_REVIEW_PROVIDER` if the same models sit behind a router.
 - The persona files exist in this skill directory (shipped with the skill):
   `prompts/swe.md`, `prompts/architect.md`, `prompts/chair.md`, `prompts/factcheck.md`, and
   the file-type checklists under `prompts/rules/`.

@@ -582,6 +582,98 @@ status_note() {
   esac
 }
 
+# ------------------------------------------------------------ failure diagnosis
+# Checks the models a failed stage was asked to run against what this OpenCode
+# setup actually has, and says so.
+#
+# It exists because opencode's own answer for an unusable model id is no answer.
+# `opencode run --model does-not-exist/at-all "hi"` EXITS 0 and prints only:
+#   Error: {"name":"UnknownError","data":{"message":"Unexpected server error..."}}
+# — no mention of the model, nothing to act on. This script then correctly reports
+# NO REPORT PRODUCED (run ok), which is accurate and still leaves the reader with
+# no idea that the cause is a model they do not have. That is the first thing
+# anyone running this skill on a machine without the default provider hits, and
+# without this check all four stages just fail in unison for no stated reason.
+#
+# `opencode models` costs about 7s, so it never runs on the happy path — only
+# once, after something has already failed, where the cost does not matter.
+# Memoised because several stages fail together in exactly that case.
+# `opencode models` is itself a network-touching call, and this runs on the path
+# where something has already gone wrong — so it gets its own short timeout.
+# Without one, a provider that hangs would hang the diagnosis too, outliving the
+# run it exists to explain.
+DIAG_TIMEOUT=30
+DIAG_DONE=0
+diagnose_models() { # $@ = the model ids whose stages failed
+  [ "$DIAG_DONE" -eq 1 ] && return 0
+  DIAG_DONE=1
+
+  local avail rc missing="" m tmp pid wpid
+  if [ -n "$TIMEOUT_BIN" ]; then
+    avail="$("$TIMEOUT_BIN" "$DIAG_TIMEOUT" opencode models 2>/dev/null)"
+    rc=$?
+  else
+    # Same shape as oc_run's fallback watchdog, for a machine with no timeout(1).
+    #
+    # No `|| echo /tmp/<fixed>.$$` fallback when mktemp fails, unlike the older
+    # temp files above. A predictable name under a shared /tmp can be pre-placed
+    # as a symlink by a local user, and this one is a redirection target, so the
+    # link would be followed and whatever it points at truncated — the same
+    # hazard KEEP_DIR is created with `mktemp -d` to avoid. This check is
+    # optional by nature, so when there is nowhere safe to write it is skipped
+    # and said, rather than made to work at that price.
+    tmp="$(mktemp 2>/dev/null)"
+    if [ -z "$tmp" ]; then
+      log "diag  : no timeout(1) and mktemp failed, so model access could not be checked."
+      return 0
+    fi
+    opencode models >"$tmp" 2>/dev/null &
+    pid=$!
+    (
+      sleep "$DIAG_TIMEOUT"
+      kill -TERM "$pid" 2>/dev/null
+      sleep 3
+      kill -KILL "$pid" 2>/dev/null
+    ) &
+    wpid=$!
+    wait "$pid" 2>/dev/null
+    rc=$?
+    kill "$wpid" 2>/dev/null
+    wait "$wpid" 2>/dev/null
+    avail="$(cat "$tmp" 2>/dev/null)"
+    rm -f "$tmp"
+  fi
+
+  # A non-zero exit can still leave partial output on stdout; judging model
+  # access from a truncated listing would invent missing models. Bail instead.
+  if [ "$rc" -ne 0 ]; then
+    log "diag  : 'opencode models' failed (status ${rc}), so model access could not be checked."
+    return 0
+  fi
+  if [ -z "$avail" ]; then
+    log "diag  : 'opencode models' returned nothing, so model access could not be checked."
+    return 0
+  fi
+
+  # Exact whole-line match. Verified against the real command: one id per line,
+  # no header, no ANSI once stdout is a pipe, and — the part that matters for a
+  # routed setup — ids carry their provider prefix verbatim, so the prefixed
+  # `omniroute/opencode-go/glm-5.2` this script builds is exactly what is listed.
+  for m in "$@"; do
+    [ -n "$m" ] || continue
+    printf '%s\n' "$avail" | grep -qxF -- "$m" || missing="${missing} ${m}"
+  done
+
+  if [ -z "$missing" ]; then
+    log "diag  : every model involved is present in 'opencode models', so this was not model access."
+    return 0
+  fi
+
+  log "diag  : NOT available in this OpenCode setup:${missing}"
+  log "diag  : that alone accounts for an empty report — opencode exits 0 on an unusable model id and reports only a generic server error."
+  log "diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL, or set OPENCODE_REVIEW_PROVIDER=<id> if they sit behind a router. Run 'opencode models' to see what is configured."
+}
+
 # ------------------------------------------------------------ report extraction
 # What oc_run captures is a TRANSCRIPT, not a report: opencode renders tool-call
 # headers, tool output (including an echo of the whole diff, once per member),
@@ -753,6 +845,10 @@ if [ -n "$SINGLE_AGENT" ]; then
   cat "$single_rep"
   echo "===== END OF REVIEW ====="
   log "single-agent review: $(stage_note "$st" "$ex")"
+  # No model to check here — the agent carries its own. The equivalent trap is
+  # config-shaped, so state it rather than checking it.
+  { [ "$st" -ne 0 ] || [ "$ex" -eq 2 ]; } &&
+    log "diag  : if this produced nothing, confirm agent '${SINGLE_AGENT}' exists in opencode.jsonc, is mode:primary, and names a model you have."
   [ "$st" -eq 0 ] && [ "$ex" -eq 2 ] && st=1
   exit "$st"
 fi
@@ -769,6 +865,7 @@ if [ -n "$SINGLE_MODEL" ]; then
   cat "$single_rep"
   echo "===== END OF REVIEW ====="
   log "single-model review: $(stage_note "$st" "$ex")"
+  { [ "$st" -ne 0 ] || [ "$ex" -eq 2 ]; } && diagnose_models "$SINGLE_MODEL"
   [ "$st" -eq 0 ] && [ "$ex" -eq 2 ] && st=1
   exit "$st"
 fi
@@ -870,5 +967,16 @@ if [ "$status" -eq 0 ]; then
   log "committee review complete."
 else
   log "committee review finished with issues (chair=$(stage_note "$chair_st" "$chair_ex"), swe=$(stage_note "$swe_st" "$swe_ex"), architect=$(stage_note "$arch_st" "$arch_ex"))."
+  # Only the models that actually failed, so the report names causes rather than
+  # every model the run happened to mention.
+  diag_models=""
+  { [ "$swe_st" -ne 0 ] || [ "$swe_ex" -eq 2 ]; } && diag_models="$diag_models $SWE_MODEL"
+  { [ "$arch_st" -ne 0 ] || [ "$arch_ex" -eq 2 ]; } && diag_models="$diag_models $ARCH_MODEL"
+  { [ "$chair_st" -ne 0 ] || [ "$chair_ex" -eq 2 ]; } && diag_models="$diag_models $CHAIR_MODEL"
+  { [ "$fc_st" -ne 0 ] || [ "$fc_ex" -eq 2 ]; } && diag_models="$diag_models $FACTCHECK_MODEL"
+  # Unquoted on purpose: this is a space-separated list being split into args,
+  # and model ids cannot contain whitespace or globbing characters.
+  # shellcheck disable=SC2086
+  [ -n "$diag_models" ] && diagnose_models $diag_models
 fi
 exit "$status"
