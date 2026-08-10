@@ -39,6 +39,8 @@
 #                                --agent (escape hatch; must be a mode:primary agent)
 #   OPENCODE_REVIEW_FACTCHECK    1 to run the phase-3 fact-check pass, 0 to skip (default 1)
 #   OPENCODE_REVIEW_FACTCHECK_MODEL  fact-check model (default opencode-go/deepseek-v4-pro)
+#   OPENCODE_REVIEW_FACTCHECK_DIFF_MAX  max bytes of diff inlined into the fact-check
+#                                message before it is truncated with a marker (default 200000)
 #   OPENCODE_REVIEW_DEP_DIRS     extra dependency-source dirs the file tools may read,
 #                                colon-separated (GOMODCACHE and the cargo registry are
 #                                detected automatically)
@@ -77,9 +79,19 @@ CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-${PROVIDER_PREFIX}opencode-go/qwen3.
 # Optional fact-check pass over the chair's report (port of open-code-review's
 # REVIEW_FILTER_TASK: prune only findings the diff can directly falsify). Set
 # OPENCODE_REVIEW_FACTCHECK=0 to skip. Defaults to a reasoning-strong model that is
-# independent of the chair (qwen): the pass is pure inline diff+report judgment (no
-# tools), and its failure mode is over-pruning, so it rewards disciplined instruction
-# following and faithful report reproduction over coding/agentic ability.
+# independent of the chair (qwen): the pass is inline diff+report judgment, and its
+# failure mode is over-pruning, so it rewards disciplined instruction following and
+# faithful report reproduction over coding/agentic ability.
+#
+# "Inline" is now literally true. The diff is put in the message (scope_diff), so
+# the pass has no reason to reach for a tool at all — it previously received the
+# same "go and run git diff" instruction the members get, which contradicted both
+# this comment and its own persona, and cost it the tool call it stopped on (#35).
+#
+# The cap bounds that message. Above it the diff is truncated WITH A MARKER, never
+# silently: the pass may only remove what the diff contradicts, so it has to know
+# when the diff is partial in order to keep findings about the part it cannot see.
+FACTCHECK_DIFF_MAX="${OPENCODE_REVIEW_FACTCHECK_DIFF_MAX:-200000}"
 FACTCHECK_ENABLED="${OPENCODE_REVIEW_FACTCHECK:-1}"
 FACTCHECK_MODEL="${OPENCODE_REVIEW_FACTCHECK_MODEL:-${PROVIDER_PREFIX}opencode-go/deepseek-v4-pro}"
 SINGLE_MODEL="${OPENCODE_REVIEW_MODEL:-}"
@@ -350,6 +362,50 @@ changed_files() {
       git show --name-only --pretty=format: "$SCOPE_ARG" 2>/dev/null
     else
       git diff --name-only "${SCOPE_ARG}...HEAD" 2>/dev/null
+    fi
+    ;;
+  esac
+}
+
+# ------------------------------------------------------------ fact-check input
+# scope_diff prints the diff itself for the resolved scope, mirroring
+# changed_files. Only the fact-check stage uses it: members are given the
+# instruction form so they can explore the repo around what they read, whereas
+# fact-check is defined as judging the report against the supplied diff and
+# nothing else. It was being handed the same instruction, so it had to spend a
+# tool call fetching the diff before it could begin — which is where it stopped
+# (#35).
+#
+# Untracked files have no diff, so they are rendered against /dev/null to appear
+# as the additions they are. --no-index is what makes that work on a path git is
+# not tracking.
+scope_diff() {
+  local f
+  case "$SCOPE_MODE" in
+  uncommitted)
+    git diff HEAD 2>/dev/null
+    git ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      git diff --no-index -- /dev/null "$f" 2>/dev/null
+    done
+    ;;
+  branch)
+    git diff "${SCOPE_ARG}...HEAD" 2>/dev/null
+    ;;
+  both)
+    git diff "${SCOPE_ARG}...HEAD" 2>/dev/null
+    git diff HEAD 2>/dev/null
+    git ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      git diff --no-index -- /dev/null "$f" 2>/dev/null
+    done
+    ;;
+  target)
+    if git rev-parse --verify --quiet "${SCOPE_ARG}^{commit}" >/dev/null 2>&1 &&
+      ! git show-ref --verify --quiet "refs/heads/${SCOPE_ARG}"; then
+      git show "$SCOPE_ARG" 2>/dev/null
+    else
+      git diff "${SCOPE_ARG}...HEAD" 2>/dev/null
     fi
     ;;
   esac
@@ -1031,8 +1087,25 @@ fc_applied=0
 if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "0" ]; then
   log "phase 3: fact-check (${FACTCHECK_MODEL})"
   FACTCHECK_PERSONA="$(read_prompt "$PROMPTS_DIR/factcheck.md")"
-  fc_msg="$(printf '%s\n\n===== Chair report to fact-check =====\n%s\n\n===== review target =====\n%s\n' \
-    "$FACTCHECK_PERSONA" "$(cat "$chair_rep")" "$MSG")"
+
+  # The diff goes in the message. Truncation is announced in the text rather than
+  # done silently, because the pass's safety property is that it only ever prunes
+  # what the diff contradicts: a finding about a part it cannot see must survive,
+  # and it can only apply that rule if it knows the diff is partial.
+  fc_diff_file="$WORK_DIR/fc.diff"
+  scope_diff >"$fc_diff_file" 2>/dev/null
+  fc_diff_bytes="$(wc -c <"$fc_diff_file" | tr -d ' ')"
+  if [ "$fc_diff_bytes" -gt "$FACTCHECK_DIFF_MAX" ]; then
+    fc_diff="$(head -c "$FACTCHECK_DIFF_MAX" "$fc_diff_file")
+[…DIFF TRUNCATED: ${fc_diff_bytes} bytes total, first ${FACTCHECK_DIFF_MAX} shown. Findings about anything not visible above cannot be falsified from this diff — keep them.]"
+    log "phase 3: diff is ${fc_diff_bytes} B, truncated to ${FACTCHECK_DIFF_MAX} B (raise OPENCODE_REVIEW_FACTCHECK_DIFF_MAX to send more)"
+  else
+    fc_diff="$(cat "$fc_diff_file")"
+    log "phase 3: diff inlined (${fc_diff_bytes} B)"
+  fi
+
+  fc_msg="$(printf '%s\n\n===== Chair report to fact-check =====\n%s\n\n===== The diff under review (this is the ONLY evidence you may falsify against) =====\n%s\n' \
+    "$FACTCHECK_PERSONA" "$(cat "$chair_rep")" "$fc_diff")"
   oc_run --model "$FACTCHECK_MODEL" "$fc_msg" "$fc_out"
   fc_st=$?
   extract_report "$fc_out" "$fc_rep" "factcheck"
