@@ -341,6 +341,24 @@ map_rule() {
   esac
 }
 
+# target_is_bare_commit <ref> — true when an explicit target names a commit and
+# not a ref, i.e. `git show <it>` is right and `git diff <it>...HEAD` is not.
+#
+# The single point where that is decided, because it was decided in two places
+# and got it wrong in both. Checking only `refs/heads/<it>` treats anything
+# outside refs/heads as a bare commit — so `run-review.sh origin/main`, the
+# obvious way to review a feature branch against the remote's main, resolved as a
+# commit and reviewed origin/main's tip instead of diffing against it.
+#
+# `--symbolic-full-name` settles it in one test: empty for a raw SHA, and the
+# full ref path for anything that names one, which covers local branches
+# (refs/heads), remote-tracking branches (refs/remotes) and tags (refs/tags)
+# alike. All three are things to diff against; only a SHA is a thing to show.
+target_is_bare_commit() {
+  git rev-parse --verify --quiet "$1^{commit}" >/dev/null 2>&1 || return 1
+  [ -z "$(git rev-parse --symbolic-full-name "$1" 2>/dev/null)" ]
+}
+
 # changed_files prints the affected paths for the resolved scope (one per line).
 # It must cover exactly what MSG told the members to review — a path missing here
 # gets no file-type checklist, so the models review it with the wrong focus.
@@ -357,8 +375,7 @@ changed_files() {
     uncommitted_files
     ;;
   target)
-    if git rev-parse --verify --quiet "${SCOPE_ARG}^{commit}" >/dev/null 2>&1 &&
-      ! git show-ref --verify --quiet "refs/heads/${SCOPE_ARG}"; then
+    if target_is_bare_commit "$SCOPE_ARG"; then
       git show --name-only --pretty=format: "$SCOPE_ARG" 2>/dev/null
     else
       git diff --name-only "${SCOPE_ARG}...HEAD" 2>/dev/null
@@ -379,36 +396,43 @@ changed_files() {
 # Untracked files have no diff, so they are rendered against /dev/null to appear
 # as the additions they are. --no-index is what makes that work on a path git is
 # not tracking.
+# --no-color throughout: a user with color.ui=always gets ANSI even when stdout is
+# a file, and this output goes into a prompt where escape sequences are noise the
+# model has to read past.
 scope_diff() {
   local f
   case "$SCOPE_MODE" in
   uncommitted)
-    git diff HEAD 2>/dev/null
-    git ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      git diff --no-index -- /dev/null "$f" 2>/dev/null
-    done
+    git diff --no-color HEAD 2>/dev/null
+    scope_diff_untracked
     ;;
   branch)
-    git diff "${SCOPE_ARG}...HEAD" 2>/dev/null
+    git diff --no-color "${SCOPE_ARG}...HEAD" 2>/dev/null
     ;;
   both)
-    git diff "${SCOPE_ARG}...HEAD" 2>/dev/null
-    git diff HEAD 2>/dev/null
-    git ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      git diff --no-index -- /dev/null "$f" 2>/dev/null
-    done
+    git diff --no-color "${SCOPE_ARG}...HEAD" 2>/dev/null
+    git diff --no-color HEAD 2>/dev/null
+    scope_diff_untracked
     ;;
   target)
-    if git rev-parse --verify --quiet "${SCOPE_ARG}^{commit}" >/dev/null 2>&1 &&
-      ! git show-ref --verify --quiet "refs/heads/${SCOPE_ARG}"; then
-      git show "$SCOPE_ARG" 2>/dev/null
+    if target_is_bare_commit "$SCOPE_ARG"; then
+      git show --no-color "$SCOPE_ARG" 2>/dev/null
     else
-      git diff "${SCOPE_ARG}...HEAD" 2>/dev/null
+      git diff --no-color "${SCOPE_ARG}...HEAD" 2>/dev/null
     fi
     ;;
   esac
+}
+
+# Untracked files rendered as the additions they are. A symlink is emitted as
+# `new file mode 120000` plus its target path, not the target's contents, so this
+# does not pull anything outside the tree into the prompt.
+scope_diff_untracked() {
+  local f
+  git ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    git diff --no-color --no-index -- /dev/null "$f" 2>/dev/null
+  done
 }
 
 # build_rules_block prints a checklist section (union of matched rule docs, with
@@ -1096,7 +1120,11 @@ if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "
   scope_diff >"$fc_diff_file" 2>/dev/null
   fc_diff_bytes="$(wc -c <"$fc_diff_file" | tr -d ' ')"
   if [ "$fc_diff_bytes" -gt "$FACTCHECK_DIFF_MAX" ]; then
-    fc_diff="$(head -c "$FACTCHECK_DIFF_MAX" "$fc_diff_file")
+    # Cut on a line boundary, not a byte one. `head -c` can land inside a
+    # multi-byte character, and a diff is full of CJK in comments and strings;
+    # dropping the partial last line costs nothing and keeps the text valid UTF-8
+    # for providers that reject anything else.
+    fc_diff="$(head -c "$FACTCHECK_DIFF_MAX" "$fc_diff_file" | sed '$d')
 […DIFF TRUNCATED: ${fc_diff_bytes} bytes total, first ${FACTCHECK_DIFF_MAX} shown. Findings about anything not visible above cannot be falsified from this diff — keep them.]"
     log "phase 3: diff is ${fc_diff_bytes} B, truncated to ${FACTCHECK_DIFF_MAX} B (raise OPENCODE_REVIEW_FACTCHECK_DIFF_MAX to send more)"
   else
