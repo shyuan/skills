@@ -91,6 +91,14 @@ CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-${PROVIDER_PREFIX}opencode-go/qwen3.
 # The cap bounds that message. Above it the diff is truncated WITH A MARKER, never
 # silently: the pass may only remove what the diff contradicts, so it has to know
 # when the diff is partial in order to keep findings about the part it cannot see.
+#
+# Validated here rather than trusted at the point of use. `[ "$n" -gt "$MAX" ]`
+# with a non-numeric MAX does not error out under `set -uo pipefail` — the test
+# just returns non-zero, so the else branch runs and the WHOLE diff is inlined,
+# silently past the cap that is this message's only size bound. A negative value
+# is worse than useless: `head -c -20` is "all but the last 20 bytes" on GNU and
+# `illegal byte count` on BSD, so the same config would truncate differently per
+# platform. Neither should be guessed at.
 FACTCHECK_DIFF_MAX="${OPENCODE_REVIEW_FACTCHECK_DIFF_MAX:-200000}"
 FACTCHECK_ENABLED="${OPENCODE_REVIEW_FACTCHECK:-1}"
 FACTCHECK_MODEL="${OPENCODE_REVIEW_FACTCHECK_MODEL:-${PROVIDER_PREFIX}opencode-go/deepseek-v4-pro}"
@@ -106,6 +114,16 @@ STAGGER="${OPENCODE_REVIEW_STAGGER:-3}"
 log() { printf '[opencode-review] %s\n' "$*" >&2; }
 
 # ----------------------------------------------------------------- pre-flight
+# Everything below here may call log(), which the assignments above cannot: on
+# macOS `log` is also /usr/bin/log, so a message emitted before the function is
+# defined goes to the unified logging tool and the user never sees it.
+case "$FACTCHECK_DIFF_MAX" in
+'' | *[!0-9]*)
+  log "ERROR: OPENCODE_REVIEW_FACTCHECK_DIFF_MAX must be a non-negative integer (got '${FACTCHECK_DIFF_MAX}')."
+  exit 1
+  ;;
+esac
+
 command -v opencode >/dev/null 2>&1 ||
   {
     log "ERROR: 'opencode' is not on PATH."
