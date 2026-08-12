@@ -767,14 +767,18 @@ status_note() {
 # Checks the models a failed stage was asked to run against what this OpenCode
 # setup actually has, and says so.
 #
-# It exists because opencode's own answer for an unusable model id is no answer.
-# `opencode run --model does-not-exist/at-all "hi"` EXITS 0 and prints only:
-#   Error: {"name":"UnknownError","data":{"message":"Unexpected server error..."}}
-# — no mention of the model, nothing to act on. This script then correctly reports
-# NO REPORT PRODUCED (run ok), which is accurate and still leaves the reader with
-# no idea that the cause is a model they do not have. That is the first thing
-# anyone running this skill on a machine without the default provider hits, and
-# without this check all four stages just fail in unison for no stated reason.
+# It exists because opencode's own answer for an unusable model id says nothing
+# about the model. `opencode run --model does-not-exist/at-all "hi"` exits 1 with
+# only:
+#   {"type":"error","error":{"name":"UnknownError","data":{"message":"Unexpected
+#    server error. Check server logs for details.","ref":"err_86eccad5"}}}
+# — a generic server error, no mention of the id that caused it. That is the first
+# thing anyone running this skill on a machine without the default provider hits,
+# and without this check all four stages fail in unison for no stated reason.
+#
+# (An earlier version of this comment said the run exits 0. That was measured
+# through a pipe, so the 0 was head's status, not opencode's. It exits 1, which
+# is why the diagnosis below already fired despite the wrong rationale.)
 #
 # `opencode models` costs about 7s, so it never runs on the happy path — only
 # once, after something has already failed, where the cost does not matter.
@@ -840,7 +844,7 @@ diagnose_models() { # $@ = the model ids whose stages failed
   fi
 
   log "diag  : NOT available in this OpenCode setup:${missing}"
-  log "diag  : that alone accounts for an empty report — opencode exits 0 on an unusable model id and reports only a generic server error."
+  log "diag  : that alone accounts for an empty report — opencode reports only a generic server error for an unusable model id, never naming it."
   log "diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL, or set OPENCODE_REVIEW_PROVIDER=<id> if they sit behind a router. Run 'opencode models' to see what is configured."
 }
 
@@ -970,6 +974,42 @@ print("%d\t%d\t%s" % (t, u, reason))
   fi
 }
 
+# json_error <events> -> the provider/runtime error message, or nothing.
+#
+# opencode emits `{"type":"error","error":{...}}` when a request fails outright —
+# a bad model id, an auth failure, a provider refusing the call. That event is the
+# whole diagnosis, and it is already in the stream: #30 had to go and read
+# ~/.local/share/opencode/log to find "Monthly usage limit reached" because the
+# default output format did not carry it anywhere the script could see.
+#
+# .error.data.message first, since that is where the provider's own words land;
+# .error.name is the fallback when there is no message.
+json_error() {
+  if [ "$JSON_BIN" = "jq" ]; then
+    jq -Rrn '[inputs | fromjson? | select(.type == "error")]
+             | last
+             | ((.error.data.message // .error.name // empty) | tostring)' <"$1" 2>/dev/null
+  else
+    python3 -c '
+import json, sys
+msg = ""
+with open(sys.argv[1], "r", errors="replace") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("type") == "error":
+            e = d.get("error") or {}
+            msg = (e.get("data") or {}).get("message") or e.get("name") or ""
+print(msg)
+' "$1" 2>/dev/null
+  fi
+}
+
 # report_bytes <file> -> non-whitespace byte count.
 # LC_ALL=C: reports are largely CJK and BSD tr is not multibyte-safe; a byte
 # count is all this needs, and bytewise deletion cannot choke on a UTF-8 lead.
@@ -988,10 +1028,15 @@ report_bytes() { LC_ALL=C tr -d '[:space:]' <"$1" | wc -c | tr -d ' '; }
 # reporting, which is a different failure from a silent or timed-out run: it did
 # the work and then declined to write it up. Callers surface it.
 STAGE_STOP=""
+# Set by extract_report when the stage failed because the provider rejected the
+# call rather than because the model produced nothing. Different cause, different
+# remedy: retrying against the same provider cannot help.
+STAGE_PROVIDER_ERROR=""
 extract_report() {
-  local in="$1" out="$2" stage="${3:-stage}" bytes stats texts tools reason errsz kept_events kept_err
+  local in="$1" out="$2" stage="${3:-stage}" bytes stats texts tools reason errsz kept_events kept_err perr
 
   STAGE_STOP=""
+  STAGE_PROVIDER_ERROR=""
   json_text "$in" >"$out"
   # Text parts are concatenated exactly as the model wrote them, and a model
   # rarely ends on a newline — without one, whatever the caller prints next runs
@@ -1024,6 +1069,18 @@ extract_report() {
     kept_err="$KEPT_PATH"
   fi
   KEPT_PATH="$kept_events"
+
+  # A provider error outranks everything below: the model never got to run, so
+  # counting its tool calls describes nothing. STAGE_PROVIDER_ERROR is what makes
+  # the run short-circuit rather than launching the chair into the same wall.
+  perr="$(json_error "$in")"
+  if [ -n "$perr" ]; then
+    STAGE_PROVIDER_ERROR="$perr"
+    STAGE_STOP="provider error: ${perr}"
+    log "WARN: ${stage}: ${STAGE_STOP}"
+    log "WARN: ${stage}: events kept at ${kept_events:-<none>}${kept_err:+, stderr at $kept_err}"
+    return 2
+  fi
 
   # A model that made tool calls and then stopped is the case issue #33 is about:
   # it read the diff, investigated, and ended its turn with nothing written. Say
@@ -1137,10 +1194,31 @@ arch_st=$?
 extract_report "$swe_out" "$swe_rep" "swe"
 swe_ex=$?
 swe_stop="$STAGE_STOP"
+swe_perr="$STAGE_PROVIDER_ERROR"
 extract_report "$arch_out" "$arch_rep" "architect"
 arch_ex=$?
 arch_stop="$STAGE_STOP"
+arch_perr="$STAGE_PROVIDER_ERROR"
 log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex" "$swe_stop"), architect=$(stage_note "$arch_st" "$arch_ex" "$arch_stop")"
+
+# Both members lost to the provider means the chair and the fact-checker are
+# about to be sent at the same wall, on the same provider, for the same reason —
+# and each has its own OPENCODE_REVIEW_TIMEOUT to burn before admitting it. #30
+# recorded a run that spent ~45 minutes this way and produced nothing.
+#
+# The test is deliberately narrow. It is not "both members failed": a member that
+# investigated and then stopped leaves the chair perfectly able to read the diff
+# itself and produce a degraded-but-real report, which is why that path prints a
+# DEGRADED banner instead of giving up. It is specifically "the provider refused
+# them", where continuing cannot produce anything.
+if [ -n "$swe_perr" ] && [ -n "$arch_perr" ]; then
+  log "ERROR: both members failed with a provider error; not launching the chair or fact-check."
+  log "ERROR:   swe       : ${swe_perr}"
+  log "ERROR:   architect : ${arch_perr}"
+  log "ERROR: retrying against this provider will not help — switch provider (OPENCODE_REVIEW_PROVIDER / OPENCODE_REVIEW_*_MODEL) or wait for the limit to reset."
+  echo "===== END OF REVIEW ====="
+  exit 3
+fi
 
 # Phase 2 — the chair dedupes/verifies both reports against the same target. It
 # receives the extracted reports, which is what prompts/chair.md says it will get;
