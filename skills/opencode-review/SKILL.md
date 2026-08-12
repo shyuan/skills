@@ -272,6 +272,20 @@ common cause on their own:
   injection as well as keeping the (possibly uncommitted) work tree read-only — though glob
   matching makes it defense-in-depth, not a hard sandbox. `question` and `doom_loop` are
   denied so the run can't stall waiting for input that will never come headless.
+- **The run has no network and cannot delegate.** `webfetch` and `websearch` are denied, as are
+  `task`, `skill` and `lsp`. `webfetch` was the one that mattered: it had been left unset and
+  opencode's default for it is *allow*, so a reviewer had unrestricted outbound egress while
+  reading a diff this same block documents as untrusted — a way for injected text to send repo
+  content outward, with none of the host or path restrictions bash has. No persona asks for the
+  network.
+- **Every `PermissionConfig` key is decided, not defaulted.** "Unset" is not a uniform default
+  and cannot be reasoned about as a group: in the same headless run an unset `external_directory`
+  auto-rejects while an unset `webfetch` allows. Denied: `edit`, `question`, `doom_loop`,
+  `webfetch`, `websearch`, `task`, `skill`, `lsp`. Structured: `bash`, `external_directory`.
+  Left to the user's config on purpose: `read`, `glob`, `grep`, `list`, `todowrite` — writing
+  them as explicit allows would override a user who had deliberately restricted them, and they
+  are the reviewers' actual job. Denying is free, unlike denying a bash *pattern*: a denied tool
+  is removed from the model's toolset rather than rejected on use, so it costs no turn.
 - **What the boundary actually is.** The bash patterns are path-agnostic — `head *` matches
   `head /anywhere` — so the allow-list restricts *commands*, not *paths*: reads outside the
   repo have always been possible when spelled as a shell command. The file tools are gated

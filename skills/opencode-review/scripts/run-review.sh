@@ -499,6 +499,19 @@ $(cat "$RULES_DIR/$doc")
 #   edit deny            -> read-only review (defense-in-depth over the models)
 #   question deny        -> a run cannot stall waiting for input
 #   doom_loop deny       -> a repeated identical tool call cannot stall on approval
+#   webfetch/websearch   -> deny: outbound egress while reading an untrusted diff.
+#                           Was UNSET and therefore ALLOWED — a reviewer could
+#                           fetch an arbitrary URL, which is a way for injected
+#                           text in a diff to send repo content outward, with no
+#                           host or path restriction of the kind bash has. No
+#                           persona asks for the network; nothing here needs it.
+#   task/skill deny      -> delegation. A reviewer spawning a subagent or invoking
+#                           another skill runs work this permission set does not
+#                           describe, and the committee is orchestrated from
+#                           outside opencode by design.
+#   lsp deny             -> starting a language server on the repo under review
+#                           runs project tooling over untrusted code, which is the
+#                           same reason the personas refuse tests and builds.
 #   bash "*" deny        -> default-deny: the diff under review is untrusted input
 #                           to the reviewer models (prompt injection), so only the
 #                           read-only commands below are allowed.
@@ -518,6 +531,33 @@ $(cat "$RULES_DIR/$doc")
 #                           this block relied on before. So this only widens, and
 #                           only for the paths named.
 # This is defense-in-depth over glob matching, not a hard sandbox.
+#
+# EVERY key in opencode's PermissionConfig is decided here, because "unset" is not
+# a uniform default and cannot be reasoned about as a group. Observed in the same
+# headless run: an unset `external_directory` auto-rejects, while an unset
+# `webfetch` allows. Leaving a key out is a decision to accept whatever that key's
+# default happens to be, today and after the next opencode release.
+#
+#   named deny   edit, question, doom_loop, webfetch, websearch, task, skill, lsp
+#   structured   bash (default-deny + allow-list), external_directory (dep caches)
+#   left allowed read, glob, grep, list  -> the reviewers' actual job; a review
+#                                           cannot happen without them
+#                todowrite               -> session-local scratchpad, no reach
+#                                           outside the run
+#
+# The four navigation tools and todowrite are deliberately NOT written as explicit
+# allows even though they are wanted. OPENCODE_PERMISSION is merged with the saved
+# config rather than substituted for it, so writing "read":"allow" here would
+# override a user who had deliberately restricted it. Denies are written because
+# their absence is the bug; allows are left to config because their presence is.
+#
+# Denying a tool outright is free, unlike denying a bash PATTERN. A denied tool is
+# removed from the model's toolset rather than rejected on use: asked to fetch a
+# URL under this set, a member answers "I don't have a WebFetch tool available in
+# my current toolset — only bash, glob, grep, read, and todowrite", having spent
+# no turn on it. That listing is also this block's own inventory read back by a
+# model, which is why the denies above can be broad without costing the run the
+# way a rejected call does.
 #
 # Note the bash patterns are path-AGNOSTIC: "head *" matches "head /anywhere". The
 # boundary this block draws is therefore over *commands*, not over paths — reads
@@ -610,7 +650,7 @@ fi
 # The bash map is kept as a single-quoted literal so patterns like "*$(*" are not
 # touched by the shell; only the outer object is assembled.
 PERM_BASH='{"*":"deny","git diff*":"allow","git show*":"allow","git log*":"allow","git status*":"allow","git ls-files*":"allow","git rev-parse*":"allow","git blame*":"allow","git grep*":"allow","cat *":"allow","head *":"allow","tail *":"allow","wc *":"allow","ls":"allow","ls *":"allow","grep *":"allow","rg *":"allow","*;*":"deny","*|*":"deny","*&*":"deny","*>*":"deny","*`*":"deny","*$(*":"deny","*<(*":"deny","*\n*":"deny"}'
-PERM="{\"edit\":\"deny\",\"question\":\"deny\",\"doom_loop\":\"deny\",${EXT_DIR_RULES}\"bash\":${PERM_BASH}}"
+PERM="{\"edit\":\"deny\",\"question\":\"deny\",\"doom_loop\":\"deny\",\"webfetch\":\"deny\",\"websearch\":\"deny\",\"task\":\"deny\",\"skill\":\"deny\",\"lsp\":\"deny\",${EXT_DIR_RULES}\"bash\":${PERM_BASH}}"
 
 # ------------------------------------------------------------- run scratch dir
 # One private directory holds every scratch file this run makes, so no scratch
