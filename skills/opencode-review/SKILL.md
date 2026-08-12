@@ -187,6 +187,48 @@ not a model that never ran, and not a timeout. It is the failure recorded in
 [issue #33](https://github.com/shyuan/skills/issues/33), where two members did it independently
 on the same run. The script detects and reports it; it does not currently intervene.
 
+**A provider refusal is reported as itself, and short-circuits the run.** opencode emits a
+`{"type":"error"}` event when a request fails outright — bad model id, auth failure, quota — and
+that event carries the provider's own words:
+
+```
+[opencode-review] WARN: swe: provider error: Monthly usage limit reached. Resets in 1 day.
+[opencode-review] ERROR: both members failed with a provider error; not launching the chair or fact-check.
+[opencode-review] ERROR: retrying against this provider will not help — switch provider … or wait for the limit to reset.
+```
+
+**No stage is skipped because of it**, and the run reports it in the exit status instead. A
+refused stage ends in about a second under `--format json`, so there is nothing left to save by
+giving up early — the ~45 minutes [issue #30](https://github.com/shyuan/skills/issues/30)
+recorded came from the *old* output format leaving the process alive with nothing to say, which
+#34 removed when it switched every stage to the event stream. (Fact-check was never part of that
+cost: it only runs when the chair produced a report.)
+
+Skipping the chair would also risk the whole output for no gain, because the error event cannot
+tell *"this provider is out of quota"* from *"these two model ids are wrong"* — and in the second
+case a chair on a valid model would have worked.
+
+Exit statuses: `0` clean, `1` a stage failed, `3` a stage failed **with a provider error, for a
+model the provider has**. That is the whole claim — `3` does not tell you whether to retry, and
+deliberately so:
+
+```
+Monthly usage limit reached. Resets in 1 day.   -> rerunning cannot help
+Provider rate limit exceeded                    -> rerunning may well help
+Inference is temporarily unavailable            -> rerunning may well help
+```
+
+All three arrive as the same event. The message that distinguishes them is the provider's own,
+and it is printed on the `WARN` line — so the status classifies and the message advises.
+
+Two conditions gate `3`, both supportable from evidence. There has to be an error event, which
+separates a provider failure from a model that merely stopped. And every failed model has to be
+one `opencode models` lists: a *nonexistent model id* produces the same generic `UnknownError`,
+but the cause there is local configuration and the `diag :` lines already say so (`1`). If the
+listing could not be obtained, neither is claimed and it stays `1`.
+
+`3` classifies a run that completed every stage — nothing is skipped to produce it.
+
 **When members are absent, the last thing on stdout says so**, inside the report markers:
 
 ```
@@ -199,17 +241,16 @@ misses it — and a chair report built on no members is one model's opinion wear
 shape, which is exactly the thing the design exists to avoid.
 
 **When a stage fails, the log also says whether the models were even available.** opencode
-gives no usable answer for a bad model id — `opencode run --model does-not-exist/at-all` exits
-**0** and prints a bare `UnknownError: "Unexpected server error"` that never mentions the
-model — so the script would otherwise report `NO REPORT PRODUCED (run ok)` for every stage with
-nothing pointing at the cause. This is the first thing anyone hits running the skill on a
-machine without the default provider. So on the failure path only, the run checks the failed
-stages' models against `opencode models`:
+says nothing about the model when the id is bad — `opencode run --model does-not-exist/at-all`
+emits a bare `UnknownError: "Unexpected server error"` that never names the id — so the script
+would otherwise report `NO REPORT PRODUCED` for every stage with nothing pointing at the cause.
+This is the first thing anyone hits running the skill on a machine without the default provider.
+So on the failure path only, the run checks the failed stages' models against `opencode models`:
 
 ```
 [opencode-review] diag  : NOT available in this OpenCode setup: opencode-go/kimi-k2.7-code …
-[opencode-review] diag  : that alone accounts for an empty report — opencode exits 0 on an
-                          unusable model id and reports only a generic server error.
+[opencode-review] diag  : that alone accounts for an empty report — opencode reports only a
+                          generic server error for an unusable model id, never naming it.
 [opencode-review] diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,…}_MODEL,
                           or set OPENCODE_REVIEW_PROVIDER=<id> if they sit behind a router.
 ```

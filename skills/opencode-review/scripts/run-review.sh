@@ -767,14 +767,18 @@ status_note() {
 # Checks the models a failed stage was asked to run against what this OpenCode
 # setup actually has, and says so.
 #
-# It exists because opencode's own answer for an unusable model id is no answer.
-# `opencode run --model does-not-exist/at-all "hi"` EXITS 0 and prints only:
-#   Error: {"name":"UnknownError","data":{"message":"Unexpected server error..."}}
-# — no mention of the model, nothing to act on. This script then correctly reports
-# NO REPORT PRODUCED (run ok), which is accurate and still leaves the reader with
-# no idea that the cause is a model they do not have. That is the first thing
-# anyone running this skill on a machine without the default provider hits, and
-# without this check all four stages just fail in unison for no stated reason.
+# It exists because opencode's own answer for an unusable model id says nothing
+# about the model. `opencode run --model does-not-exist/at-all "hi"` exits 1 with
+# only:
+#   {"type":"error","error":{"name":"UnknownError","data":{"message":"Unexpected
+#    server error. Check server logs for details.","ref":"err_86eccad5"}}}
+# — a generic server error, no mention of the id that caused it. That is the first
+# thing anyone running this skill on a machine without the default provider hits,
+# and without this check all four stages fail in unison for no stated reason.
+#
+# (An earlier version of this comment said the run exits 0. That was measured
+# through a pipe, so the 0 was head's status, not opencode's. It exits 1, which
+# is why the diagnosis below already fired despite the wrong rationale.)
 #
 # `opencode models` costs about 7s, so it never runs on the happy path — only
 # once, after something has already failed, where the cost does not matter.
@@ -785,6 +789,14 @@ status_note() {
 # run it exists to explain.
 DIAG_TIMEOUT=30
 DIAG_DONE=0
+# What the availability check concluded, which is also what separates a provider
+# REFUSING a model from the caller naming one that does not exist:
+#   present   every failed stage's model is in `opencode models` -> the provider
+#             had it and still said no; switching provider or waiting is the fix
+#   missing   at least one was not -> a configuration error wearing the same
+#             generic UnknownError event; the fix is to name a model you have
+#   unchecked the listing could not be obtained, so neither can be claimed
+DIAG_VERDICT="unchecked"
 diagnose_models() { # $@ = the model ids whose stages failed
   [ "$DIAG_DONE" -eq 1 ] && return 0
   DIAG_DONE=1
@@ -834,13 +846,15 @@ diagnose_models() { # $@ = the model ids whose stages failed
     printf '%s\n' "$avail" | grep -qxF -- "$m" || missing="${missing} ${m}"
   done
 
+  DIAG_VERDICT="present"
   if [ -z "$missing" ]; then
     log "diag  : every model involved is present in 'opencode models', so this was not model access."
     return 0
   fi
 
+  DIAG_VERDICT="missing"
   log "diag  : NOT available in this OpenCode setup:${missing}"
-  log "diag  : that alone accounts for an empty report — opencode exits 0 on an unusable model id and reports only a generic server error."
+  log "diag  : that alone accounts for an empty report — opencode reports only a generic server error for an unusable model id, never naming it."
   log "diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL, or set OPENCODE_REVIEW_PROVIDER=<id> if they sit behind a router. Run 'opencode models' to see what is configured."
 }
 
@@ -970,6 +984,42 @@ print("%d\t%d\t%s" % (t, u, reason))
   fi
 }
 
+# json_error <events> -> the provider/runtime error message, or nothing.
+#
+# opencode emits `{"type":"error","error":{...}}` when a request fails outright —
+# a bad model id, an auth failure, a provider refusing the call. That event is the
+# whole diagnosis, and it is already in the stream: #30 had to go and read
+# ~/.local/share/opencode/log to find "Monthly usage limit reached" because the
+# default output format did not carry it anywhere the script could see.
+#
+# .error.data.message first, since that is where the provider's own words land;
+# .error.name is the fallback when there is no message.
+json_error() {
+  if [ "$JSON_BIN" = "jq" ]; then
+    jq -Rrn '[inputs | fromjson? | select(.type == "error")]
+             | last
+             | ((.error.data.message // .error.name // empty) | tostring)' <"$1" 2>/dev/null
+  else
+    python3 -c '
+import json, sys
+msg = ""
+with open(sys.argv[1], "r", errors="replace") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("type") == "error":
+            e = d.get("error") or {}
+            msg = (e.get("data") or {}).get("message") or e.get("name") or ""
+print(msg)
+' "$1" 2>/dev/null
+  fi
+}
+
 # report_bytes <file> -> non-whitespace byte count.
 # LC_ALL=C: reports are largely CJK and BSD tr is not multibyte-safe; a byte
 # count is all this needs, and bytewise deletion cannot choke on a UTF-8 lead.
@@ -988,10 +1038,15 @@ report_bytes() { LC_ALL=C tr -d '[:space:]' <"$1" | wc -c | tr -d ' '; }
 # reporting, which is a different failure from a silent or timed-out run: it did
 # the work and then declined to write it up. Callers surface it.
 STAGE_STOP=""
+# Set by extract_report when the stage failed because the provider rejected the
+# call rather than because the model produced nothing. Different cause, different
+# remedy: retrying against the same provider cannot help.
+STAGE_PROVIDER_ERROR=""
 extract_report() {
-  local in="$1" out="$2" stage="${3:-stage}" bytes stats texts tools reason errsz kept_events kept_err
+  local in="$1" out="$2" stage="${3:-stage}" bytes stats texts tools reason errsz kept_events kept_err perr
 
   STAGE_STOP=""
+  STAGE_PROVIDER_ERROR=""
   json_text "$in" >"$out"
   # Text parts are concatenated exactly as the model wrote them, and a model
   # rarely ends on a newline — without one, whatever the caller prints next runs
@@ -1024,6 +1079,18 @@ extract_report() {
     kept_err="$KEPT_PATH"
   fi
   KEPT_PATH="$kept_events"
+
+  # A provider error outranks everything below: the model never got to run, so
+  # counting its tool calls describes nothing. STAGE_PROVIDER_ERROR is what makes
+  # the run short-circuit rather than launching the chair into the same wall.
+  perr="$(json_error "$in")"
+  if [ -n "$perr" ]; then
+    STAGE_PROVIDER_ERROR="$perr"
+    STAGE_STOP="provider error: ${perr}"
+    log "WARN: ${stage}: ${STAGE_STOP}"
+    log "WARN: ${stage}: events kept at ${kept_events:-<none>}${kept_err:+, stderr at $kept_err}"
+    return 2
+  fi
 
   # A model that made tool calls and then stopped is the case issue #33 is about:
   # it read the diff, investigated, and ended its turn with nothing written. Say
@@ -1137,10 +1204,36 @@ arch_st=$?
 extract_report "$swe_out" "$swe_rep" "swe"
 swe_ex=$?
 swe_stop="$STAGE_STOP"
+swe_perr="$STAGE_PROVIDER_ERROR"
 extract_report "$arch_out" "$arch_rep" "architect"
 arch_ex=$?
 arch_stop="$STAGE_STOP"
+arch_perr="$STAGE_PROVIDER_ERROR"
 log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex" "$swe_stop"), architect=$(stage_note "$arch_st" "$arch_ex" "$arch_stop")"
+
+# Both members lost to the provider. The chair is launched anyway.
+#
+# An earlier version of this stopped here, on the reasoning from #30 that the
+# chair and fact-check were about to burn a timeout each against the same wall.
+# Measured, that reasoning no longer holds and had not been checked:
+#
+#   - fact-check already only runs when the chair produced a report, so it was
+#     never launched in this scenario at all;
+#   - a provider refusal under --format json ends the run in ~1.3s, not at the
+#     900s timeout. The 45 minutes #30 recorded came from the OLD output format
+#     leaving the process alive with nothing to say, which #34 removed when it
+#     switched every stage to the event stream.
+#
+# So skipping the chair saved about a second, while risking the whole output:
+# json_error cannot tell "this provider is out of quota" from "these two model
+# ids are wrong", and in the second case a chair on a valid model in the same
+# namespace would have worked. Losing a usable degraded report to save 1.3s is
+# not a trade worth making, so the run continues and only says what happened.
+if [ -n "$swe_perr" ] && [ -n "$arch_perr" ]; then
+  log "WARN: both members failed with a provider error; continuing to the chair, which may still read the diff itself."
+  log "WARN:   swe       : ${swe_perr}"
+  log "WARN:   architect : ${arch_perr}"
+fi
 
 # Phase 2 — the chair dedupes/verifies both reports against the same target. It
 # receives the extracted reports, which is what prompts/chair.md says it will get;
@@ -1158,12 +1251,14 @@ chair_st=$?
 extract_report "$chair_out" "$chair_rep" "chair"
 chair_ex=$?
 chair_stop="$STAGE_STOP"
+chair_perr="$STAGE_PROVIDER_ERROR"
 
 # Phase 3 (optional) — fact-check the chair's report against the diff only,
 # pruning findings the diff can directly falsify. On any failure the chair's
 # report is emitted unchanged, so this phase can only ever reduce false positives.
 fc_st=0
 fc_stop=""
+fc_perr=""
 fc_ex=0
 fc_applied=0
 if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "0" ]; then
@@ -1197,6 +1292,7 @@ if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "
   extract_report "$fc_out" "$fc_rep" "factcheck"
   fc_ex=$?
   fc_stop="$STAGE_STOP"
+  fc_perr="$STAGE_PROVIDER_ERROR"
   if [ "$fc_st" -eq 0 ] && [ "$fc_ex" -ne 2 ]; then
     fc_applied=1
     log "phase 3 done: fact-check applied"
@@ -1268,5 +1364,34 @@ else
   # and model ids cannot contain whitespace or globbing characters.
   # shellcheck disable=SC2086
   [ -n "$diag_models" ] && diagnose_models $diag_models
+
+  # Exit 3 means: a stage failed because the PROVIDER returned an error, for a
+  # model the provider does have. That is all it means, and the wording below is
+  # careful to claim no more.
+  #
+  # It said more, through four rounds of review, and each round narrowed a claim
+  # that was still too strong. The last of them was "rerunning this cannot help",
+  # which the provider errors actually seen do not support:
+  #
+  #   Monthly usage limit reached. Resets in 1 day.   -> rerunning cannot help
+  #   Provider rate limit exceeded                    -> rerunning may well help
+  #   Inference is temporarily unavailable            -> rerunning may well help
+  #
+  # An error event says something failed at the provider. It does not say whether
+  # to retry, switch, or fix credentials — and the message that DOES say, in the
+  # provider's own words, is already printed on the WARN line above. So the status
+  # classifies and the message advises, rather than the status guessing.
+  #
+  # Two conditions still gate it, because both are supportable. There has to be an
+  # error event at all, which separates a provider failure from a model that
+  # merely stopped. And every failed model has to be one `opencode models` lists:
+  # a missing model produces the same generic UnknownError, but the cause is local
+  # configuration and diagnose_models has already said so. An unchecked listing
+  # claims neither.
+  if [ "$DIAG_VERDICT" = "present" ] &&
+    { [ -n "$swe_perr" ] || [ -n "$arch_perr" ] || [ -n "$chair_perr" ] || [ -n "$fc_perr" ]; }; then
+    log "committee review: a stage failed with a provider error, for a model the provider has. Read the provider's message on the WARN line above — it distinguishes a quota that resets, a rate limit worth retrying, and an outage."
+    status=3
+  fi
 fi
 exit "$status"
