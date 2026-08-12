@@ -125,6 +125,12 @@ Optional environment overrides:
 - `OPENCODE_REVIEW_FACTCHECK=0` — disable the phase-3 fact-check pass (default on).
 - `OPENCODE_REVIEW_FACTCHECK_MODEL=<id>` — model for the fact-check pass (default
   `opencode-go/deepseek-v4-pro`; reasoning-strong and independent of the chair model).
+- `OPENCODE_REVIEW_FACTCHECK_DIFF_MAX=<bytes>` — how much of the diff is inlined into the
+  phase-3 message before it is truncated (default `200000`). The fact-checker is given the diff
+  itself, not an instruction to fetch one, since it may only prune findings that diff
+  contradicts. Truncation is announced in the text with a marker rather than done silently —
+  the pass has to know the diff is partial in order to keep findings about the part it cannot
+  see. Raise this if you suspect relevant findings fall in the truncated tail.
 - `OPENCODE_REVIEW_TIMEOUT=<seconds>` — per-model hard timeout (default `900`).
 - `OPENCODE_REVIEW_STAGGER=<seconds>` — delay between the two parallel member launches
   (default `3`), to avoid opencode's session-init "database is locked" startup race.
