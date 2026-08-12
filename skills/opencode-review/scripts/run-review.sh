@@ -1201,47 +1201,26 @@ arch_stop="$STAGE_STOP"
 arch_perr="$STAGE_PROVIDER_ERROR"
 log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex" "$swe_stop"), architect=$(stage_note "$arch_st" "$arch_ex" "$arch_stop")"
 
-# model_namespace <model-id> — everything before the final path segment, which is
-# the part that identifies WHERE a model is served from:
-#   opencode-go/kimi-k2.7-code    -> opencode-go
-#   omniroute/opencode-go/glm-5.2 -> omniroute/opencode-go
-#   omniroute/aug/opus4.8         -> omniroute/aug
-#   jbridge/claude-opus-4-8       -> jbridge
-# The provider proper is only the first segment, but comparing just that would
-# call every model behind one router the same place — and a router's whole point
-# is fronting several upstreams with separate quotas.
-model_namespace() { printf '%s' "${1%/*}"; }
-
-# Both members lost to the provider, so the chair and the fact-checker may be
-# about to be sent at the same wall for the same reason, each with its own
-# OPENCODE_REVIEW_TIMEOUT to burn before admitting it. #30 recorded a run that
-# spent ~45 minutes this way and produced nothing.
+# Both members lost to the provider. The chair is launched anyway.
 #
-# Two things have to hold before giving up, and both are narrow on purpose.
+# An earlier version of this stopped here, on the reasoning from #30 that the
+# chair and fact-check were about to burn a timeout each against the same wall.
+# Measured, that reasoning no longer holds and had not been checked:
 #
-# It is not "both members failed": a member that investigated and then stopped
-# leaves the chair perfectly able to read the diff itself and produce a
-# degraded-but-real report, which is why that path prints a DEGRADED banner
-# instead of giving up. It has to be "the provider refused them".
+#   - fact-check already only runs when the chair produced a report, so it was
+#     never launched in this scenario at all;
+#   - a provider refusal under --format json ends the run in ~1.3s, not at the
+#     900s timeout. The 45 minutes #30 recorded came from the OLD output format
+#     leaving the process alive with nothing to say, which #34 removed when it
+#     switched every stage to the event stream.
 #
-# And it is not "the members failed, therefore the chair will": the four stages
-# take independent model ids and may be pointed at different providers entirely
-# (a chair on jbridge is unaffected by opencode-go running out of quota). Only a
-# chair served from the same place as a refused member is known to be walking
-# into the same wall. When the namespaces differ the run continues and says why —
-# losing a usable report costs more than the timeouts do.
+# So skipping the chair saved about a second, while risking the whole output:
+# json_error cannot tell "this provider is out of quota" from "these two model
+# ids are wrong", and in the second case a chair on a valid model in the same
+# namespace would have worked. Losing a usable degraded report to save 1.3s is
+# not a trade worth making, so the run continues and only says what happened.
 if [ -n "$swe_perr" ] && [ -n "$arch_perr" ]; then
-  chair_ns="$(model_namespace "$CHAIR_MODEL")"
-  if [ "$chair_ns" = "$(model_namespace "$SWE_MODEL")" ] ||
-    [ "$chair_ns" = "$(model_namespace "$ARCH_MODEL")" ]; then
-    log "ERROR: both members failed with a provider error, and the chair is served from the same place (${chair_ns})."
-    log "ERROR:   swe       : ${swe_perr}"
-    log "ERROR:   architect : ${arch_perr}"
-    log "ERROR: not launching the chair or fact-check — retrying against this provider cannot help. Switch provider (OPENCODE_REVIEW_PROVIDER / OPENCODE_REVIEW_*_MODEL) or wait for the limit to reset."
-    echo "===== END OF REVIEW ====="
-    exit 3
-  fi
-  log "WARN: both members failed with a provider error, but the chair (${chair_ns}) is served from elsewhere — continuing, it may still produce a degraded report."
+  log "WARN: both members failed with a provider error; continuing to the chair, which may still read the diff itself."
   log "WARN:   swe       : ${swe_perr}"
   log "WARN:   architect : ${arch_perr}"
 fi
@@ -1262,12 +1241,14 @@ chair_st=$?
 extract_report "$chair_out" "$chair_rep" "chair"
 chair_ex=$?
 chair_stop="$STAGE_STOP"
+chair_perr="$STAGE_PROVIDER_ERROR"
 
 # Phase 3 (optional) — fact-check the chair's report against the diff only,
 # pruning findings the diff can directly falsify. On any failure the chair's
 # report is emitted unchanged, so this phase can only ever reduce false positives.
 fc_st=0
 fc_stop=""
+fc_perr=""
 fc_ex=0
 fc_applied=0
 if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "0" ]; then
@@ -1301,6 +1282,7 @@ if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "
   extract_report "$fc_out" "$fc_rep" "factcheck"
   fc_ex=$?
   fc_stop="$STAGE_STOP"
+  fc_perr="$STAGE_PROVIDER_ERROR"
   if [ "$fc_st" -eq 0 ] && [ "$fc_ex" -ne 2 ]; then
     fc_applied=1
     log "phase 3 done: fact-check applied"
@@ -1372,5 +1354,14 @@ else
   # and model ids cannot contain whitespace or globbing characters.
   # shellcheck disable=SC2086
   [ -n "$diag_models" ] && diagnose_models $diag_models
+
+  # A provider refusal gets its own status, because it is the one failure where
+  # running the same command again cannot help: the caller has to change model or
+  # wait. This is classification only — every stage has already run and nothing
+  # was skipped to reach here.
+  if [ -n "$swe_perr" ] || [ -n "$arch_perr" ] || [ -n "$chair_perr" ] || [ -n "$fc_perr" ]; then
+    log "committee review: a provider refused at least one stage — rerunning this configuration will not help. Switch provider (OPENCODE_REVIEW_PROVIDER / OPENCODE_REVIEW_*_MODEL) or wait for the limit to reset."
+    status=3
+  fi
 fi
 exit "$status"

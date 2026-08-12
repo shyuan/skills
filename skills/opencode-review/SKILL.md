@@ -197,25 +197,21 @@ that event carries the provider's own words:
 [opencode-review] ERROR: retrying against this provider will not help — switch provider … or wait for the limit to reset.
 ```
 
-When **both** members lose to the provider **and the chair is served from the same place**, the
-run exits **3** immediately rather than burning the chair's and fact-check's timeouts on the same
-wall — [issue #30](https://github.com/shyuan/skills/issues/30) recorded ~45 minutes spent that
-way for nothing.
+**No stage is skipped because of it**, and the run reports it in the exit status instead. A
+refused stage ends in about a second under `--format json`, so there is nothing left to save by
+giving up early — the ~45 minutes [issue #30](https://github.com/shyuan/skills/issues/30)
+recorded came from the *old* output format leaving the process alive with nothing to say, which
+#34 removed when it switched every stage to the event stream. (Fact-check was never part of that
+cost: it only runs when the chair produced a report.)
 
-Two conditions, both narrow on purpose:
+Skipping the chair would also risk the whole output for no gain, because the error event cannot
+tell *"this provider is out of quota"* from *"these two model ids are wrong"* — and in the second
+case a chair on a valid model would have worked.
 
-- *Both members hit a **provider error***, not *both members failed*. A member that investigated
-  and then stopped still leaves the chair able to read the diff itself, which is why that path
-  prints the DEGRADED banner instead of giving up.
-- *The chair is served from the same namespace* as a refused member. The four stages take
-  independent model ids and may point at different providers entirely — a chair on `jbridge` is
-  unaffected by `opencode-go` running out of quota. The namespace compared is everything before
-  the final path segment (`omniroute/opencode-go/glm-5.2` → `omniroute/opencode-go`), so a router
-  fronting several upstreams with separate quotas is not treated as one place. When they differ
-  the run continues and logs why: losing a usable report costs more than the timeouts do.
-
-Exit statuses: `0` clean, `1` something failed but a report was produced, `3` provider refused
-the run — the one case where retrying the same configuration cannot help.
+Exit statuses: `0` clean, `1` a stage failed, `3` a stage failed **and a provider refused it** —
+the one case where rerunning the same configuration cannot help, as opposed to a model that
+merely stopped. `3` is a classification of a run that completed every stage, not a run that
+stopped early.
 
 **When members are absent, the last thing on stdout says so**, inside the report markers:
 
