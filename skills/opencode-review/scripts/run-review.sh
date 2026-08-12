@@ -789,6 +789,14 @@ status_note() {
 # run it exists to explain.
 DIAG_TIMEOUT=30
 DIAG_DONE=0
+# What the availability check concluded, which is also what separates a provider
+# REFUSING a model from the caller naming one that does not exist:
+#   present   every failed stage's model is in `opencode models` -> the provider
+#             had it and still said no; switching provider or waiting is the fix
+#   missing   at least one was not -> a configuration error wearing the same
+#             generic UnknownError event; the fix is to name a model you have
+#   unchecked the listing could not be obtained, so neither can be claimed
+DIAG_VERDICT="unchecked"
 diagnose_models() { # $@ = the model ids whose stages failed
   [ "$DIAG_DONE" -eq 1 ] && return 0
   DIAG_DONE=1
@@ -838,11 +846,13 @@ diagnose_models() { # $@ = the model ids whose stages failed
     printf '%s\n' "$avail" | grep -qxF -- "$m" || missing="${missing} ${m}"
   done
 
+  DIAG_VERDICT="present"
   if [ -z "$missing" ]; then
     log "diag  : every model involved is present in 'opencode models', so this was not model access."
     return 0
   fi
 
+  DIAG_VERDICT="missing"
   log "diag  : NOT available in this OpenCode setup:${missing}"
   log "diag  : that alone accounts for an empty report — opencode reports only a generic server error for an unusable model id, never naming it."
   log "diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL, or set OPENCODE_REVIEW_PROVIDER=<id> if they sit behind a router. Run 'opencode models' to see what is configured."
@@ -1356,11 +1366,24 @@ else
   [ -n "$diag_models" ] && diagnose_models $diag_models
 
   # A provider refusal gets its own status, because it is the one failure where
-  # running the same command again cannot help: the caller has to change model or
-  # wait. This is classification only — every stage has already run and nothing
-  # was skipped to reach here.
-  if [ -n "$swe_perr" ] || [ -n "$arch_perr" ] || [ -n "$chair_perr" ] || [ -n "$fc_perr" ]; then
-    log "committee review: a provider refused at least one stage — rerunning this configuration will not help. Switch provider (OPENCODE_REVIEW_PROVIDER / OPENCODE_REVIEW_*_MODEL) or wait for the limit to reset."
+  # running the same command again cannot help: the caller has to change provider
+  # or wait. Classification only — every stage has already run, nothing was
+  # skipped to reach here.
+  #
+  # An error event alone does NOT establish that. opencode reports a nonexistent
+  # model id with the same generic UnknownError it reports a quota rejection
+  # with, and telling someone to "wait for the limit to reset" when they have
+  # actually mistyped a model name sends them the wrong way entirely.
+  #
+  # diagnose_models above already resolves the ambiguity, without matching on
+  # error text: it has just checked the failed stages' models against
+  # `opencode models`. If one was missing, the error is a configuration mistake
+  # and its own diag lines say so. Only when every failed model IS available —
+  # the provider had it and still said no — is this a refusal. When the listing
+  # could not be obtained, neither can be claimed, so it stays 1.
+  if [ "$DIAG_VERDICT" = "present" ] &&
+    { [ -n "$swe_perr" ] || [ -n "$arch_perr" ] || [ -n "$chair_perr" ] || [ -n "$fc_perr" ]; }; then
+    log "committee review: the provider refused a stage whose model it does have — rerunning this configuration will not help. Switch provider (OPENCODE_REVIEW_PROVIDER / OPENCODE_REVIEW_*_MODEL) or wait for the limit to reset."
     status=3
   fi
 fi

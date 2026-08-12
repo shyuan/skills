@@ -208,10 +208,19 @@ Skipping the chair would also risk the whole output for no gain, because the err
 tell *"this provider is out of quota"* from *"these two model ids are wrong"* — and in the second
 case a chair on a valid model would have worked.
 
-Exit statuses: `0` clean, `1` a stage failed, `3` a stage failed **and a provider refused it** —
-the one case where rerunning the same configuration cannot help, as opposed to a model that
-merely stopped. `3` is a classification of a run that completed every stage, not a run that
-stopped early.
+Exit statuses: `0` clean, `1` a stage failed, `3` a stage failed **and the provider refused a
+model it does have**.
+
+`3` is narrower than "an error event appeared", because an error event does not establish a
+refusal: opencode reports a *nonexistent model id* with the same generic `UnknownError` it
+reports a quota rejection with, and telling someone to wait for a limit to reset when they have
+mistyped a model name sends them the wrong way. The availability check above resolves it without
+matching on error text — if a failed stage's model is missing from `opencode models` the cause is
+configuration and its `diag :` lines say so (`1`); only when the provider *had* the model and
+still said no is it a refusal (`3`). If the listing could not be obtained, neither is claimed and
+it stays `1`.
+
+`3` classifies a run that completed every stage — nothing is skipped to produce it.
 
 **When members are absent, the last thing on stdout says so**, inside the report markers:
 
