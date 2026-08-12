@@ -1201,23 +1201,49 @@ arch_stop="$STAGE_STOP"
 arch_perr="$STAGE_PROVIDER_ERROR"
 log "phase 1 done: swe=$(stage_note "$swe_st" "$swe_ex" "$swe_stop"), architect=$(stage_note "$arch_st" "$arch_ex" "$arch_stop")"
 
-# Both members lost to the provider means the chair and the fact-checker are
-# about to be sent at the same wall, on the same provider, for the same reason —
-# and each has its own OPENCODE_REVIEW_TIMEOUT to burn before admitting it. #30
-# recorded a run that spent ~45 minutes this way and produced nothing.
+# model_namespace <model-id> — everything before the final path segment, which is
+# the part that identifies WHERE a model is served from:
+#   opencode-go/kimi-k2.7-code    -> opencode-go
+#   omniroute/opencode-go/glm-5.2 -> omniroute/opencode-go
+#   omniroute/aug/opus4.8         -> omniroute/aug
+#   jbridge/claude-opus-4-8       -> jbridge
+# The provider proper is only the first segment, but comparing just that would
+# call every model behind one router the same place — and a router's whole point
+# is fronting several upstreams with separate quotas.
+model_namespace() { printf '%s' "${1%/*}"; }
+
+# Both members lost to the provider, so the chair and the fact-checker may be
+# about to be sent at the same wall for the same reason, each with its own
+# OPENCODE_REVIEW_TIMEOUT to burn before admitting it. #30 recorded a run that
+# spent ~45 minutes this way and produced nothing.
 #
-# The test is deliberately narrow. It is not "both members failed": a member that
-# investigated and then stopped leaves the chair perfectly able to read the diff
-# itself and produce a degraded-but-real report, which is why that path prints a
-# DEGRADED banner instead of giving up. It is specifically "the provider refused
-# them", where continuing cannot produce anything.
+# Two things have to hold before giving up, and both are narrow on purpose.
+#
+# It is not "both members failed": a member that investigated and then stopped
+# leaves the chair perfectly able to read the diff itself and produce a
+# degraded-but-real report, which is why that path prints a DEGRADED banner
+# instead of giving up. It has to be "the provider refused them".
+#
+# And it is not "the members failed, therefore the chair will": the four stages
+# take independent model ids and may be pointed at different providers entirely
+# (a chair on jbridge is unaffected by opencode-go running out of quota). Only a
+# chair served from the same place as a refused member is known to be walking
+# into the same wall. When the namespaces differ the run continues and says why —
+# losing a usable report costs more than the timeouts do.
 if [ -n "$swe_perr" ] && [ -n "$arch_perr" ]; then
-  log "ERROR: both members failed with a provider error; not launching the chair or fact-check."
-  log "ERROR:   swe       : ${swe_perr}"
-  log "ERROR:   architect : ${arch_perr}"
-  log "ERROR: retrying against this provider will not help — switch provider (OPENCODE_REVIEW_PROVIDER / OPENCODE_REVIEW_*_MODEL) or wait for the limit to reset."
-  echo "===== END OF REVIEW ====="
-  exit 3
+  chair_ns="$(model_namespace "$CHAIR_MODEL")"
+  if [ "$chair_ns" = "$(model_namespace "$SWE_MODEL")" ] ||
+    [ "$chair_ns" = "$(model_namespace "$ARCH_MODEL")" ]; then
+    log "ERROR: both members failed with a provider error, and the chair is served from the same place (${chair_ns})."
+    log "ERROR:   swe       : ${swe_perr}"
+    log "ERROR:   architect : ${arch_perr}"
+    log "ERROR: not launching the chair or fact-check — retrying against this provider cannot help. Switch provider (OPENCODE_REVIEW_PROVIDER / OPENCODE_REVIEW_*_MODEL) or wait for the limit to reset."
+    echo "===== END OF REVIEW ====="
+    exit 3
+  fi
+  log "WARN: both members failed with a provider error, but the chair (${chair_ns}) is served from elsewhere — continuing, it may still produce a degraded report."
+  log "WARN:   swe       : ${swe_perr}"
+  log "WARN:   architect : ${arch_perr}"
 fi
 
 # Phase 2 — the chair dedupes/verifies both reports against the same target. It

@@ -197,13 +197,22 @@ that event carries the provider's own words:
 [opencode-review] ERROR: retrying against this provider will not help — switch provider … or wait for the limit to reset.
 ```
 
-When **both** members lose to the provider the run exits **3** immediately, because the chair
-and fact-check are about to be sent at the same wall on the same provider, each with its own
-`OPENCODE_REVIEW_TIMEOUT` to burn first —
-[issue #30](https://github.com/shyuan/skills/issues/30) recorded ~45 minutes spent that way for
-nothing. The test is deliberately narrow: *both members hit a provider error*, not *both members
-failed*. A member that investigated and then stopped still leaves the chair able to read the diff
-itself, which is why that path prints the DEGRADED banner instead of giving up.
+When **both** members lose to the provider **and the chair is served from the same place**, the
+run exits **3** immediately rather than burning the chair's and fact-check's timeouts on the same
+wall — [issue #30](https://github.com/shyuan/skills/issues/30) recorded ~45 minutes spent that
+way for nothing.
+
+Two conditions, both narrow on purpose:
+
+- *Both members hit a **provider error***, not *both members failed*. A member that investigated
+  and then stopped still leaves the chair able to read the diff itself, which is why that path
+  prints the DEGRADED banner instead of giving up.
+- *The chair is served from the same namespace* as a refused member. The four stages take
+  independent model ids and may point at different providers entirely — a chair on `jbridge` is
+  unaffected by `opencode-go` running out of quota. The namespace compared is everything before
+  the final path segment (`omniroute/opencode-go/glm-5.2` → `omniroute/opencode-go`), so a router
+  fronting several upstreams with separate quotas is not treated as one place. When they differ
+  the run continues and logs why: losing a usable report costs more than the timeouts do.
 
 Exit statuses: `0` clean, `1` something failed but a report was produced, `3` provider refused
 the run — the one case where retrying the same configuration cannot help.
