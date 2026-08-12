@@ -208,17 +208,24 @@ Skipping the chair would also risk the whole output for no gain, because the err
 tell *"this provider is out of quota"* from *"these two model ids are wrong"* — and in the second
 case a chair on a valid model would have worked.
 
-Exit statuses: `0` clean, `1` a stage failed, `3` a stage failed **and the provider refused a
-model it does have**.
+Exit statuses: `0` clean, `1` a stage failed, `3` a stage failed **with a provider error, for a
+model the provider has**. That is the whole claim — `3` does not tell you whether to retry, and
+deliberately so:
 
-`3` is narrower than "an error event appeared", because an error event does not establish a
-refusal: opencode reports a *nonexistent model id* with the same generic `UnknownError` it
-reports a quota rejection with, and telling someone to wait for a limit to reset when they have
-mistyped a model name sends them the wrong way. The availability check above resolves it without
-matching on error text — if a failed stage's model is missing from `opencode models` the cause is
-configuration and its `diag :` lines say so (`1`); only when the provider *had* the model and
-still said no is it a refusal (`3`). If the listing could not be obtained, neither is claimed and
-it stays `1`.
+```
+Monthly usage limit reached. Resets in 1 day.   -> rerunning cannot help
+Provider rate limit exceeded                    -> rerunning may well help
+Inference is temporarily unavailable            -> rerunning may well help
+```
+
+All three arrive as the same event. The message that distinguishes them is the provider's own,
+and it is printed on the `WARN` line — so the status classifies and the message advises.
+
+Two conditions gate `3`, both supportable from evidence. There has to be an error event, which
+separates a provider failure from a model that merely stopped. And every failed model has to be
+one `opencode models` lists: a *nonexistent model id* produces the same generic `UnknownError`,
+but the cause there is local configuration and the `diag :` lines already say so (`1`). If the
+listing could not be obtained, neither is claimed and it stays `1`.
 
 `3` classifies a run that completed every stage — nothing is skipped to produce it.
 

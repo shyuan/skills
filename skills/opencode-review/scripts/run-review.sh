@@ -1365,25 +1365,32 @@ else
   # shellcheck disable=SC2086
   [ -n "$diag_models" ] && diagnose_models $diag_models
 
-  # A provider refusal gets its own status, because it is the one failure where
-  # running the same command again cannot help: the caller has to change provider
-  # or wait. Classification only — every stage has already run, nothing was
-  # skipped to reach here.
+  # Exit 3 means: a stage failed because the PROVIDER returned an error, for a
+  # model the provider does have. That is all it means, and the wording below is
+  # careful to claim no more.
   #
-  # An error event alone does NOT establish that. opencode reports a nonexistent
-  # model id with the same generic UnknownError it reports a quota rejection
-  # with, and telling someone to "wait for the limit to reset" when they have
-  # actually mistyped a model name sends them the wrong way entirely.
+  # It said more, through four rounds of review, and each round narrowed a claim
+  # that was still too strong. The last of them was "rerunning this cannot help",
+  # which the provider errors actually seen do not support:
   #
-  # diagnose_models above already resolves the ambiguity, without matching on
-  # error text: it has just checked the failed stages' models against
-  # `opencode models`. If one was missing, the error is a configuration mistake
-  # and its own diag lines say so. Only when every failed model IS available —
-  # the provider had it and still said no — is this a refusal. When the listing
-  # could not be obtained, neither can be claimed, so it stays 1.
+  #   Monthly usage limit reached. Resets in 1 day.   -> rerunning cannot help
+  #   Provider rate limit exceeded                    -> rerunning may well help
+  #   Inference is temporarily unavailable            -> rerunning may well help
+  #
+  # An error event says something failed at the provider. It does not say whether
+  # to retry, switch, or fix credentials — and the message that DOES say, in the
+  # provider's own words, is already printed on the WARN line above. So the status
+  # classifies and the message advises, rather than the status guessing.
+  #
+  # Two conditions still gate it, because both are supportable. There has to be an
+  # error event at all, which separates a provider failure from a model that
+  # merely stopped. And every failed model has to be one `opencode models` lists:
+  # a missing model produces the same generic UnknownError, but the cause is local
+  # configuration and diagnose_models has already said so. An unchecked listing
+  # claims neither.
   if [ "$DIAG_VERDICT" = "present" ] &&
     { [ -n "$swe_perr" ] || [ -n "$arch_perr" ] || [ -n "$chair_perr" ] || [ -n "$fc_perr" ]; }; then
-    log "committee review: the provider refused a stage whose model it does have — rerunning this configuration will not help. Switch provider (OPENCODE_REVIEW_PROVIDER / OPENCODE_REVIEW_*_MODEL) or wait for the limit to reset."
+    log "committee review: a stage failed with a provider error, for a model the provider has. Read the provider's message on the WARN line above — it distinguishes a quota that resets, a rate limit worth retrying, and an outage."
     status=3
   fi
 fi
