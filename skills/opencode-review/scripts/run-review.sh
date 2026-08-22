@@ -30,9 +30,9 @@
 #                                "omniroute" -> omniroute/opencode-go/glm-5.2. Applies
 #                                to the four DEFAULTS below only; an explicit *_MODEL
 #                                is always a full id. Unset = direct (unchanged).
-#   OPENCODE_REVIEW_SWE_MODEL    default opencode-go/kimi-k2.7-code
+#   OPENCODE_REVIEW_SWE_MODEL    default opencode-go/kimi-k3
 #   OPENCODE_REVIEW_ARCH_MODEL   default opencode-go/glm-5.2
-#   OPENCODE_REVIEW_CHAIR_MODEL  default opencode-go/qwen3.7-max
+#   OPENCODE_REVIEW_CHAIR_MODEL  default opencode-go/qwen3.8-max
 #   OPENCODE_REVIEW_MODEL        run a SINGLE model (with the SWE persona) instead
 #                                of the committee
 #   OPENCODE_REVIEW_AGENT        run a SINGLE pre-configured opencode agent via
@@ -73,9 +73,25 @@ PROVIDER="${OPENCODE_REVIEW_PROVIDER:-}"
 PROVIDER="${PROVIDER%/}" # tolerate "omniroute/"
 PROVIDER_PREFIX="${PROVIDER:+${PROVIDER}/}"
 
-SWE_MODEL="${OPENCODE_REVIEW_SWE_MODEL:-${PROVIDER_PREFIX}opencode-go/kimi-k2.7-code}"
+# The SWE member is the seat that runs out of context first: it reads the whole
+# diff, the rules checklists, and whatever else it opens with the file tools. Its
+# default used to be the only one with a small window — kimi-k2.7-code caps at
+# 262k where the other three defaults sit at ~1M — and real runs died on that
+# ceiling. kimi-k3 is the same family with a 1M window, so the asymmetry is gone
+# rather than worked around. It bills more per token (~3x in, ~4x out); a run that
+# overruns the window bills for the whole thing and returns no report.
+SWE_MODEL="${OPENCODE_REVIEW_SWE_MODEL:-${PROVIDER_PREFIX}opencode-go/kimi-k3}"
 ARCH_MODEL="${OPENCODE_REVIEW_ARCH_MODEL:-${PROVIDER_PREFIX}opencode-go/glm-5.2}"
-CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-${PROVIDER_PREFIX}opencode-go/qwen3.7-max}"
+# The chair is the precision lever — it is what rejects the members' shaky items,
+# and the fact-check pass below can only ever remove a subset of what it lets
+# through. It is also the one stage that WRITES at length, since the consolidated
+# report is its output, so the output cap is the limit that binds here rather than
+# the context window: qwen3.7-max capped at 64k, the tightest of the four defaults.
+# qwen3.8-max doubles that to 131k and is cheaper on all four price components,
+# with the same reasoning controls. Swapped on that basis, not on a measured
+# quality win — if its synthesis reads worse than 3.7's, pin the old id via
+# OPENCODE_REVIEW_CHAIR_MODEL.
+CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-${PROVIDER_PREFIX}opencode-go/qwen3.8-max}"
 # Optional fact-check pass over the chair's report (port of open-code-review's
 # REVIEW_FILTER_TASK: prune only findings the diff can directly falsify). Set
 # OPENCODE_REVIEW_FACTCHECK=0 to skip. Defaults to a reasoning-strong model that is
