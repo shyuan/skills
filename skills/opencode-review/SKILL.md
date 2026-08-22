@@ -114,8 +114,8 @@ Optional environment overrides:
   surfaces as a provider error rather than an up-front warning. Declare `limit` on those
   models in `opencode.jsonc` if that bites.
 - `OPENCODE_REVIEW_SWE_MODEL` / `OPENCODE_REVIEW_ARCH_MODEL` / `OPENCODE_REVIEW_CHAIR_MODEL`
-  — override the committee's models (defaults: `opencode-go/kimi-k2.7-code`, `opencode-go/glm-5.2`,
-  `opencode-go/qwen3.7-max`).
+  — override the committee's models (defaults: `opencode-go/kimi-k3`, `opencode-go/glm-5.2`,
+  `opencode-go/qwen3.8-max`).
 - `OPENCODE_REVIEW_MODEL=<id>` — skip the committee and run a single model (with the SWE persona).
 - `OPENCODE_REVIEW_AGENT=<name>` — escape hatch: run a single **pre-configured** opencode
   agent via `--agent` (must be `mode:primary`).
@@ -248,7 +248,7 @@ This is the first thing anyone hits running the skill on a machine without the d
 So on the failure path only, the run checks the failed stages' models against `opencode models`:
 
 ```
-[opencode-review] diag  : NOT available in this OpenCode setup: opencode-go/kimi-k2.7-code …
+[opencode-review] diag  : NOT available in this OpenCode setup: opencode-go/kimi-k3 …
 [opencode-review] diag  : that alone accounts for an empty report — opencode reports only a
                           generic server error for an unusable model id, never naming it.
 [opencode-review] diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,…}_MODEL,
