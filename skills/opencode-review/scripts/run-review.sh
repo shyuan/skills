@@ -27,11 +27,11 @@
 #
 # Env overrides:
 #   OPENCODE_REVIEW_PROVIDER     provider to reach the default models through, e.g.
-#                                "omniroute" -> omniroute/opencode-go/glm-5.2. Applies
+#                                "omniroute" -> omniroute/opencode-go/glm-5.3. Applies
 #                                to the four DEFAULTS below only; an explicit *_MODEL
 #                                is always a full id. Unset = direct (unchanged).
 #   OPENCODE_REVIEW_SWE_MODEL    default opencode-go/kimi-k3
-#   OPENCODE_REVIEW_ARCH_MODEL   default opencode-go/glm-5.2
+#   OPENCODE_REVIEW_ARCH_MODEL   default opencode-go/glm-5.3
 #   OPENCODE_REVIEW_CHAIR_MODEL  default opencode-go/qwen3.8-max
 #   OPENCODE_REVIEW_MODEL        run a SINGLE model (with the SWE persona) instead
 #                                of the committee
@@ -56,7 +56,7 @@ PROMPTS_DIR="$SCRIPT_DIR/../prompts"
 # ------------------------------------------------------------- model selection
 # The defaults name the models by their DIRECT provider (opencode-go/…), which is
 # one account. A setup that fronts several plans with a router (OmniRoute and the
-# like) exposes the same models one level down — omniroute/opencode-go/glm-5.2 —
+# like) exposes the same models one level down — omniroute/opencode-go/glm-5.3 —
 # and reaching them that way is what spreads a run's four calls (two of them
 # concurrent) across the plans instead of stacking them on one.
 #
@@ -81,7 +81,7 @@ PROVIDER_PREFIX="${PROVIDER:+${PROVIDER}/}"
 # rather than worked around. It bills more per token (~3x in, ~4x out); a run that
 # overruns the window bills for the whole thing and returns no report.
 SWE_MODEL="${OPENCODE_REVIEW_SWE_MODEL:-${PROVIDER_PREFIX}opencode-go/kimi-k3}"
-ARCH_MODEL="${OPENCODE_REVIEW_ARCH_MODEL:-${PROVIDER_PREFIX}opencode-go/glm-5.2}"
+ARCH_MODEL="${OPENCODE_REVIEW_ARCH_MODEL:-${PROVIDER_PREFIX}opencode-go/glm-5.3}"
 # The chair is the precision lever — it is what rejects the members' shaky items,
 # and the fact-check pass below can only ever remove a subset of what it lets
 # through. It is also the one stage that WRITES at length, since the consolidated
@@ -856,7 +856,7 @@ diagnose_models() { # $@ = the model ids whose stages failed
   # Exact whole-line match. Verified against the real command: one id per line,
   # no header, no ANSI once stdout is a pipe, and — the part that matters for a
   # routed setup — ids carry their provider prefix verbatim, so the prefixed
-  # `omniroute/opencode-go/glm-5.2` this script builds is exactly what is listed.
+  # `omniroute/opencode-go/glm-5.3` this script builds is exactly what is listed.
   for m in "$@"; do
     [ -n "$m" ] || continue
     printf '%s\n' "$avail" | grep -qxF -- "$m" || missing="${missing} ${m}"
