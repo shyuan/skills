@@ -776,17 +776,36 @@ else
   VARIANTS_REQUESTED="${SWE_VARIANT}${ARCH_VARIANT}${CHAIR_VARIANT}"
   [ "$FACTCHECK_ENABLED" != "0" ] && VARIANTS_REQUESTED="${VARIANTS_REQUESTED}${FACTCHECK_VARIANT}"
 fi
+#
+# BOUNDED, on both branches. report_variant_support waits on this pid, so an
+# unbounded probe would be strictly worse than no probe: every stage could finish
+# and the report be ready, and the run would still never return — a hang
+# introduced by a diagnostic, on the happy path, for a machine that already has
+# no timeout(1). Where timeout(1) exists it does the work; where it does not, the
+# same built-in watchdog oc_run and diagnose_models use does. A probe killed
+# either way leaves an empty capture, which report_variant_support already reads
+# as "claim nothing".
+VARIANT_PROBE_TIMEOUT=30
 VARIANT_PROBE_OUT="$WORK_DIR/variant-help.out"
 VARIANT_PROBE_PID=""
+VARIANT_PROBE_WPID=""
 if [ -n "$VARIANTS_REQUESTED" ]; then
   if [ -n "$TIMEOUT_BIN" ]; then
-    "$TIMEOUT_BIN" 30 opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
+    "$TIMEOUT_BIN" "$VARIANT_PROBE_TIMEOUT" opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
+    VARIANT_PROBE_PID=$!
   else
     opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
+    VARIANT_PROBE_PID=$!
+    (
+      sleep "$VARIANT_PROBE_TIMEOUT"
+      kill -TERM "$VARIANT_PROBE_PID" 2>/dev/null
+      sleep 3
+      kill -KILL "$VARIANT_PROBE_PID" 2>/dev/null
+    ) &
+    VARIANT_PROBE_WPID=$!
   fi
-  VARIANT_PROBE_PID=$!
 fi
-trap 'rm -rf "$WORK_DIR"; [ -n "${VARIANT_PROBE_PID:-}" ] && kill "$VARIANT_PROBE_PID" 2>/dev/null; :' EXIT
+trap 'rm -rf "$WORK_DIR"; for _p in "${VARIANT_PROBE_PID:-}" "${VARIANT_PROBE_WPID:-}"; do [ -n "$_p" ] && kill "$_p" 2>/dev/null; done; :' EXIT
 
 # Reports the probe's verdict. Called once, last, on every exit path that ran
 # stages — success and failure alike.
@@ -805,6 +824,13 @@ report_variant_support() {
   [ -n "$VARIANT_PROBE_PID" ] || return 0
   wait "$VARIANT_PROBE_PID" 2>/dev/null
   VARIANT_PROBE_PID=""
+  # The watchdog has nothing left to guard once the probe is reaped, and left
+  # alive it would outlive the run by up to VARIANT_PROBE_TIMEOUT seconds.
+  if [ -n "$VARIANT_PROBE_WPID" ]; then
+    kill "$VARIANT_PROBE_WPID" 2>/dev/null
+    wait "$VARIANT_PROBE_WPID" 2>/dev/null
+    VARIANT_PROBE_WPID=""
+  fi
   local help
   help="$(cat "$VARIANT_PROBE_OUT" 2>/dev/null)"
   [ -n "$help" ] || return 0
