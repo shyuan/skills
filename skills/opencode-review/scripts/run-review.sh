@@ -785,27 +785,58 @@ fi
 # same built-in watchdog oc_run and diagnose_models use does. A probe killed
 # either way leaves an empty capture, which report_variant_support already reads
 # as "claim nothing".
+#
+# SELF-CONTAINED, which is the part the shape here exists for. The whole probe —
+# the call, its watchdog, and the reaping of both — is one background unit, and
+# the main shell tracks only the wrapper.
+#
+# The obvious spelling, a bare `opencode run --help &` plus a sleep-then-kill
+# watchdog held in a variable, is wrong HERE in a way it is not wrong in oc_run.
+# oc_run waits for its process and cancels its watchdog on the next line; this
+# probe is deliberately harvested at the END of the run, minutes later. A
+# sleep(30) watchdog whose cancellation is deferred that long is not guarding
+# anything for most of its life — the probe finishes in ~6s — and bash reaps
+# background children eagerly rather than leaving zombies that hold their pid, so
+# by the time the watchdog woke it could TERM a pid the kernel had since handed
+# to someone else. Measured, not assumed: `sleep 0.2 & p=$!; sleep 1; kill -0 $p`
+# already fails, well before any `wait`.
+#
+# Reaping inside the wrapper closes that. The watchdog is cancelled the instant
+# the probe exits, so the window where its target pid is stale is the microseconds
+# between the inner `wait` returning and the `kill` on the next line — the same
+# residual oc_run has, rather than a multi-minute one. Cancelling it really does
+# disarm it: killing the watchdog shell leaves its `sleep` orphaned, but the
+# `kill -TERM` after that sleep is a line the dead shell never reaches. Verified
+# by letting a cancelled watchdog's deadline pass and checking it never fired.
+# The stray sleep exits on its own and signals nothing.
+#
+# It also means the probe stays bounded if the run exits early and the trap kills
+# the wrapper: the orphaned watchdog is then still armed and fires, so the unit
+# cleans itself up either way.
 VARIANT_PROBE_TIMEOUT=30
 VARIANT_PROBE_OUT="$WORK_DIR/variant-help.out"
 VARIANT_PROBE_PID=""
-VARIANT_PROBE_WPID=""
 if [ -n "$VARIANTS_REQUESTED" ]; then
   if [ -n "$TIMEOUT_BIN" ]; then
     "$TIMEOUT_BIN" "$VARIANT_PROBE_TIMEOUT" opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
-    VARIANT_PROBE_PID=$!
   else
-    opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
-    VARIANT_PROBE_PID=$!
     (
-      sleep "$VARIANT_PROBE_TIMEOUT"
-      kill -TERM "$VARIANT_PROBE_PID" 2>/dev/null
-      sleep 3
-      kill -KILL "$VARIANT_PROBE_PID" 2>/dev/null
+      opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
+      _probe=$!
+      (
+        sleep "$VARIANT_PROBE_TIMEOUT"
+        kill -TERM "$_probe" 2>/dev/null
+        sleep 3
+        kill -KILL "$_probe" 2>/dev/null
+      ) &
+      _wd=$!
+      wait "$_probe" 2>/dev/null
+      kill "$_wd" 2>/dev/null
     ) &
-    VARIANT_PROBE_WPID=$!
   fi
+  VARIANT_PROBE_PID=$!
 fi
-trap 'rm -rf "$WORK_DIR"; for _p in "${VARIANT_PROBE_PID:-}" "${VARIANT_PROBE_WPID:-}"; do [ -n "$_p" ] && kill "$_p" 2>/dev/null; done; :' EXIT
+trap 'rm -rf "$WORK_DIR"; [ -n "${VARIANT_PROBE_PID:-}" ] && kill "$VARIANT_PROBE_PID" 2>/dev/null; :' EXIT
 
 # Reports the probe's verdict. Called once, last, on every exit path that ran
 # stages — success and failure alike.
@@ -821,16 +852,11 @@ trap 'rm -rf "$WORK_DIR"; for _p in "${VARIANT_PROBE_PID:-}" "${VARIANT_PROBE_WP
 # truncated listing: empty output would otherwise "prove" the flag missing on any
 # machine where --help itself failed.
 report_variant_support() {
+  # One pid to wait on: the wrapper has already reaped the probe and cancelled
+  # its watchdog by the time it exits.
   [ -n "$VARIANT_PROBE_PID" ] || return 0
   wait "$VARIANT_PROBE_PID" 2>/dev/null
   VARIANT_PROBE_PID=""
-  # The watchdog has nothing left to guard once the probe is reaped, and left
-  # alive it would outlive the run by up to VARIANT_PROBE_TIMEOUT seconds.
-  if [ -n "$VARIANT_PROBE_WPID" ]; then
-    kill "$VARIANT_PROBE_WPID" 2>/dev/null
-    wait "$VARIANT_PROBE_WPID" 2>/dev/null
-    VARIANT_PROBE_WPID=""
-  fi
   local help
   help="$(cat "$VARIANT_PROBE_OUT" 2>/dev/null)"
   [ -n "$help" ] || return 0
