@@ -17,11 +17,14 @@ agents entirely.)
 
 **You (Claude Code) are the lead/orchestrator.** The script fans out to two members in
 parallel, then hands both reports to the chair, then runs an optional fact-check pass:
-- SWE — correctness/bugs/security (`prompts/swe.md`, default model Kimi)
-- Architect — design/architecture (`prompts/architect.md`, default model GLM)
-- Chair — dedupe + verify + fill gaps → final report (`prompts/chair.md`, default model Qwen)
+- SWE — correctness/bugs/security (`prompts/swe.md`, default model Muse Spark Contributor)
+- Architect — design/architecture (`prompts/architect.md`, default model GLM Flash)
+- Chair — dedupe + verify + fill gaps → final report (`prompts/chair.md`, default model Qwen Flash)
 - Fact-check (optional, phase 3) — prunes only findings the diff can directly falsify
-  (`prompts/factcheck.md`, default model DeepSeek V4 Pro)
+  (`prompts/factcheck.md`, default model DeepSeek V4 Flash)
+
+Every seat runs on the **cheap tier of its family, at high reasoning effort** — see
+[Why these models](#why-these-models).
 
 **File-type review checklists (ported from Alibaba's open-code-review).** Before fan-out,
 the script maps every changed file to a focus checklist under `prompts/rules/` (first match
@@ -104,7 +107,7 @@ bash scripts/run-review.sh ""            # force: uncommitted changes only
 Optional environment overrides:
 
 - `OPENCODE_REVIEW_PROVIDER=<id>` — reach the **default** models through a provider one level
-  up, e.g. `omniroute` → `omniroute/opencode-go/glm-5.3`. For a setup that fronts several
+  up, e.g. `omniroute` → `omniroute/opencode-go/glm-5.3-flash`. For a setup that fronts several
   OpenCode plans with a router, this is what spreads a run's four calls (two of them
   concurrent) across the plans instead of stacking them on one account. Unset (the default)
   the ids are used directly, unchanged. It applies to the four defaults only — an explicit
@@ -114,9 +117,18 @@ Optional environment overrides:
   surfaces as a provider error rather than an up-front warning. Declare `limit` on those
   models in `opencode.jsonc` if that bites.
 - `OPENCODE_REVIEW_SWE_MODEL` / `OPENCODE_REVIEW_ARCH_MODEL` / `OPENCODE_REVIEW_CHAIR_MODEL`
-  — override the committee's models (defaults: `opencode-go/kimi-k3`, `opencode-go/glm-5.3`,
-  `opencode-go/qwen3.8-max`).
+  — override the committee's models (defaults: `opencode-go/muse-spark-1.3-contributor`,
+  `opencode-go/glm-5.3-flash`, `opencode-go/qwen3.8-flash`).
+- `OPENCODE_REVIEW_SWE_VARIANT` / `_ARCH_VARIANT` / `_CHAIR_VARIANT` / `_FACTCHECK_VARIANT`
+  — the reasoning effort each seat runs at, passed to opencode as `--variant`. Defaults
+  `xhigh`, `max`, `xhigh`, `max` respectively. Effort names are **per-model** — they come
+  from each model's own `reasoning_options`, and the ladders differ (`glm`/`deepseek` top
+  out at `max`, `muse`/`qwen` at `xhigh`) — so a default variant is only valid for the
+  model it was picked for. Naming your own model for a seat therefore **clears that seat's
+  variant** unless you also name one; set a variant to `""` to pass none.
 - `OPENCODE_REVIEW_MODEL=<id>` — skip the committee and run a single model (with the SWE persona).
+- `OPENCODE_REVIEW_VARIANT=<effort>` — variant for `OPENCODE_REVIEW_MODEL`. No default: the
+  model is the caller's choice, so its effort ladder is unknown here.
 - `OPENCODE_REVIEW_AGENT=<name>` — escape hatch: run a single **pre-configured** opencode
   agent via `--agent` (must be `mode:primary`).
 - `OPENCODE_REVIEW_RULES=0` — disable the file-type checklist injection (default on).
@@ -124,7 +136,7 @@ Optional environment overrides:
   tools may read (Go's `GOMODCACHE` and `$CARGO_HOME/registry` are detected automatically).
 - `OPENCODE_REVIEW_FACTCHECK=0` — disable the phase-3 fact-check pass (default on).
 - `OPENCODE_REVIEW_FACTCHECK_MODEL=<id>` — model for the fact-check pass (default
-  `opencode-go/deepseek-v4-pro`; reasoning-strong and independent of the chair model).
+  `opencode-go/deepseek-v4-flash`; independent of the chair model).
 - `OPENCODE_REVIEW_FACTCHECK_DIFF_MAX=<bytes>` — how much of the diff is inlined into the
   phase-3 message before it is truncated (default `200000`). The fact-checker is given the diff
   itself, not an instruction to fetch one, since it may only prune findings that diff
@@ -248,7 +260,7 @@ This is the first thing anyone hits running the skill on a machine without the d
 So on the failure path only, the run checks the failed stages' models against `opencode models`:
 
 ```
-[opencode-review] diag  : NOT available in this OpenCode setup: opencode-go/kimi-k3 …
+[opencode-review] diag  : NOT available in this OpenCode setup: opencode-go/glm-5.3-flash …
 [opencode-review] diag  : that alone accounts for an empty report — opencode reports only a
                           generic server error for an unusable model id, never naming it.
 [opencode-review] diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,…}_MODEL,
@@ -286,6 +298,9 @@ common cause on their own:
   The defaults name `opencode-go/*` models, which assumes an OpenCode Go plan; on a setup
   without one, point `OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL` at models from
   `opencode models`, or set `OPENCODE_REVIEW_PROVIDER` if the same models sit behind a router.
+  Doing either clears that seat's reasoning-effort default, since effort names are per-model.
+- An `opencode` new enough to have `run --variant`. If it is not, the diagnosis on the
+  failure path says so by name — nothing else in the run mentions the flag.
 - **`jq` or `python3` is on `PATH`** — one of them reads opencode's JSON events. Checked at
   startup, so a missing reader fails immediately with that message rather than as four empty
   stages.
@@ -293,6 +308,33 @@ common cause on their own:
   `prompts/swe.md`, `prompts/architect.md`, `prompts/chair.md`, `prompts/factcheck.md`, and
   the file-type checklists under `prompts/rules/`.
 - The current working directory is inside a git repository.
+
+## Why these models
+
+Every seat sits on the **cheap tier of the family it used to run at the top of**, and buys
+back what that costs with **reasoning effort** rather than with a bigger model. A committee
+run is four calls, two of them reading the whole diff — the flagship tier priced a routine
+pre-PR check like a rare one. Per million tokens, in/out:
+
+| seat | was | now | effort |
+|---|---|---|---|
+| SWE | `kimi-k3` — 3.00 / 15.00 | `muse-spark-1.3-contributor` — 0.10 / 0.20 | `xhigh` |
+| Architect | `glm-5.3` — 1.40 / 4.40 | `glm-5.3-flash` — 0.075 / 0.25 | `max` |
+| Chair | `qwen3.8-max` — 2.00 / 6.00 | `qwen3.8-flash` — 0.15 / 0.47 | `xhigh` |
+| Fact-check | `deepseek-v4-pro` — 0.66 / 1.98 | `deepseek-v4-flash` — 0.22 / 0.66 | `max` |
+
+The two limits the seats actually bind on survive the swap, which is what makes it a swap
+rather than a downgrade in kind. Every replacement keeps a **~1M context window** — the SWE
+seat's constraint, since it reads the whole diff plus the rules checklists plus whatever it
+opens with the file tools, and a run that overruns bills for the whole thing and returns no
+report — and a **≥131k output cap**, the chair's constraint, since the consolidated report is
+its output and a 64k cap once truncated it.
+
+None of this is a measured quality claim; it is a cost/quality trade taken deliberately. **If
+the committee reads thin, spend on the chair first** — it is the precision lever, the stage
+that rejects the members' shaky items, and the fact-check pass below can only ever remove a
+subset of what it lets through. Put `qwen3.8-max` back via `OPENCODE_REVIEW_CHAIR_MODEL`
+before touching the other three, and remember to set `OPENCODE_REVIEW_CHAIR_VARIANT` with it.
 
 ## Why the run is configured the way it is
 
