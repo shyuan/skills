@@ -27,18 +27,24 @@
 #
 # Env overrides:
 #   OPENCODE_REVIEW_PROVIDER     provider to reach the default models through, e.g.
-#                                "omniroute" -> omniroute/opencode-go/glm-5.3. Applies
-#                                to the four DEFAULTS below only; an explicit *_MODEL
-#                                is always a full id. Unset = direct (unchanged).
-#   OPENCODE_REVIEW_SWE_MODEL    default opencode-go/kimi-k3
-#   OPENCODE_REVIEW_ARCH_MODEL   default opencode-go/glm-5.3
-#   OPENCODE_REVIEW_CHAIR_MODEL  default opencode-go/qwen3.8-max
+#                                "omniroute" -> omniroute/opencode-go/glm-5.3-flash.
+#                                Applies to the four DEFAULTS below only; an explicit
+#                                *_MODEL is always a full id. Unset = direct (unchanged).
+#   OPENCODE_REVIEW_SWE_MODEL    default opencode-go/muse-spark-1.3-contributor
+#   OPENCODE_REVIEW_ARCH_MODEL   default opencode-go/glm-5.3-flash
+#   OPENCODE_REVIEW_CHAIR_MODEL  default opencode-go/qwen3.8-flash
+#   OPENCODE_REVIEW_SWE_VARIANT / _ARCH_VARIANT / _CHAIR_VARIANT / _FACTCHECK_VARIANT
+#                                reasoning-effort variant for that seat (`--variant`).
+#                                Defaults (swe=xhigh arch=max chair=xhigh factcheck=max)
+#                                apply ONLY while the seat runs its DEFAULT model, since
+#                                effort names are per-model; set to "" for none.
+#   OPENCODE_REVIEW_VARIANT      variant for OPENCODE_REVIEW_MODEL (no default)
 #   OPENCODE_REVIEW_MODEL        run a SINGLE model (with the SWE persona) instead
 #                                of the committee
 #   OPENCODE_REVIEW_AGENT        run a SINGLE pre-configured opencode agent via
 #                                --agent (escape hatch; must be a mode:primary agent)
 #   OPENCODE_REVIEW_FACTCHECK    1 to run the phase-3 fact-check pass, 0 to skip (default 1)
-#   OPENCODE_REVIEW_FACTCHECK_MODEL  fact-check model (default opencode-go/deepseek-v4-pro)
+#   OPENCODE_REVIEW_FACTCHECK_MODEL  fact-check model (default opencode-go/deepseek-v4-flash)
 #   OPENCODE_REVIEW_FACTCHECK_DIFF_MAX  max bytes of diff inlined into the fact-check
 #                                message before it is truncated with a marker (default 200000)
 #   OPENCODE_REVIEW_DEP_DIRS     extra dependency-source dirs the file tools may read,
@@ -56,7 +62,7 @@ PROMPTS_DIR="$SCRIPT_DIR/../prompts"
 # ------------------------------------------------------------- model selection
 # The defaults name the models by their DIRECT provider (opencode-go/…), which is
 # one account. A setup that fronts several plans with a router (OmniRoute and the
-# like) exposes the same models one level down — omniroute/opencode-go/glm-5.3 —
+# like) exposes the same models one level down — omniroute/opencode-go/glm-5.3-flash —
 # and reaching them that way is what spreads a run's four calls (two of them
 # concurrent) across the plans instead of stacking them on one.
 #
@@ -73,31 +79,50 @@ PROVIDER="${OPENCODE_REVIEW_PROVIDER:-}"
 PROVIDER="${PROVIDER%/}" # tolerate "omniroute/"
 PROVIDER_PREFIX="${PROVIDER:+${PROVIDER}/}"
 
+# All four defaults sit on the cheap tier of the family they used to run at the
+# top of, and each buys back what that costs with reasoning effort (VARIANTs
+# below) rather than with a bigger model. A committee run is four calls, two of
+# them reading the whole diff, so the flagship tier priced a routine pre-PR check
+# like a rare one. Per million tokens, in/out:
+#
+#   swe        kimi-k3        3.00/15.00 -> muse-spark-1.3-contributor 0.10/0.20
+#   architect  glm-5.3        1.40/ 4.40 -> glm-5.3-flash              0.075/0.25
+#   chair      qwen3.8-max    2.00/ 6.00 -> qwen3.8-flash              0.15/0.47
+#   factcheck  deepseek-v4-pro 0.66/1.98 -> deepseek-v4-flash          0.22/0.66
+#
+# The two limits the seats actually bind on survive the swap, which is why it is
+# a swap and not a downgrade in kind: every replacement keeps a ~1M context
+# window (the SWE seat's constraint — see below) and a >=131k output cap (the
+# chair's — it is the stage that writes at length). Nothing here is a measured
+# quality claim; it is a cost/quality trade taken deliberately. If a seat's
+# synthesis reads worse, pin the old id via its OPENCODE_REVIEW_*_MODEL.
+#
 # The SWE member is the seat that runs out of context first: it reads the whole
 # diff, the rules checklists, and whatever else it opens with the file tools. Its
-# default used to be the only one with a small window — kimi-k2.7-code caps at
-# 262k where the other three defaults sit at ~1M — and real runs died on that
-# ceiling. kimi-k3 is the same family with a 1M window, so the asymmetry is gone
-# rather than worked around. It bills more per token (~3x in, ~4x out); a run that
-# overruns the window bills for the whole thing and returns no report.
-SWE_MODEL="${OPENCODE_REVIEW_SWE_MODEL:-${PROVIDER_PREFIX}opencode-go/kimi-k3}"
-ARCH_MODEL="${OPENCODE_REVIEW_ARCH_MODEL:-${PROVIDER_PREFIX}opencode-go/glm-5.3}"
+# default was once the only one with a small window — kimi-k2.7-code caps at 262k
+# where the others sit at ~1M — and real runs died on that ceiling, so the window
+# is a hard requirement for this seat, not a preference. muse-spark-1.3-contributor
+# has 1M, the same as kimi-k3 it replaces.
+SWE_MODEL="${OPENCODE_REVIEW_SWE_MODEL:-${PROVIDER_PREFIX}opencode-go/muse-spark-1.3-contributor}"
+ARCH_MODEL="${OPENCODE_REVIEW_ARCH_MODEL:-${PROVIDER_PREFIX}opencode-go/glm-5.3-flash}"
 # The chair is the precision lever — it is what rejects the members' shaky items,
 # and the fact-check pass below can only ever remove a subset of what it lets
 # through. It is also the one stage that WRITES at length, since the consolidated
-# report is its output, so the output cap is the limit that binds here rather than
-# the context window: qwen3.7-max capped at 64k, the tightest of the four defaults.
-# qwen3.8-max doubles that to 131k and is cheaper on all four price components,
-# with the same reasoning controls. Swapped on that basis, not on a measured
-# quality win — if its synthesis reads worse than 3.7's, pin the old id via
-# OPENCODE_REVIEW_CHAIR_MODEL.
-CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-${PROVIDER_PREFIX}opencode-go/qwen3.8-max}"
+# report is its output, so the OUTPUT cap is the limit that binds here rather than
+# the context window: qwen3.7-max capped at 64k and truncated reports. qwen3.8-flash
+# keeps the 131k qwen3.8-max has. Being the precision lever is also why this is the
+# seat to spend on first if the cheap committee reads thin — put qwen3.8-max back
+# here via OPENCODE_REVIEW_CHAIR_MODEL before touching the other three.
+CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-${PROVIDER_PREFIX}opencode-go/qwen3.8-flash}"
 # Optional fact-check pass over the chair's report (port of open-code-review's
 # REVIEW_FILTER_TASK: prune only findings the diff can directly falsify). Set
-# OPENCODE_REVIEW_FACTCHECK=0 to skip. Defaults to a reasoning-strong model that is
-# independent of the chair (qwen): the pass is inline diff+report judgment, and its
-# failure mode is over-pruning, so it rewards disciplined instruction following and
-# faithful report reproduction over coding/agentic ability.
+# OPENCODE_REVIEW_FACTCHECK=0 to skip. Defaults to a model from a different family
+# than the chair (qwen): the pass is inline diff+report judgment, and its failure
+# mode is over-pruning, so it rewards disciplined instruction following and faithful
+# report reproduction over coding/agentic ability — and it is checking the chair, so
+# sharing the chair's blind spots is the one thing it must not do. Run at "max"
+# effort for the same reason the other three seats run near the top of their ladder:
+# on this tier, effort is the cheapest quality there is.
 #
 # "Inline" is now literally true. The diff is put in the message (scope_diff), so
 # the pass has no reason to reach for a tool at all — it previously received the
@@ -117,8 +142,34 @@ CHAIR_MODEL="${OPENCODE_REVIEW_CHAIR_MODEL:-${PROVIDER_PREFIX}opencode-go/qwen3.
 # platform. Neither should be guessed at.
 FACTCHECK_DIFF_MAX="${OPENCODE_REVIEW_FACTCHECK_DIFF_MAX:-200000}"
 FACTCHECK_ENABLED="${OPENCODE_REVIEW_FACTCHECK:-1}"
-FACTCHECK_MODEL="${OPENCODE_REVIEW_FACTCHECK_MODEL:-${PROVIDER_PREFIX}opencode-go/deepseek-v4-pro}"
+FACTCHECK_MODEL="${OPENCODE_REVIEW_FACTCHECK_MODEL:-${PROVIDER_PREFIX}opencode-go/deepseek-v4-flash}"
 SINGLE_MODEL="${OPENCODE_REVIEW_MODEL:-}"
+
+# ---------------------------------------------------------- reasoning variants
+# `opencode run --variant <effort>` picks a model's reasoning effort. Every seat
+# runs at or near the top of what its model offers, which is the half of the cost
+# swap above that buys quality back: effort is far cheaper than a bigger model,
+# and every one of these four stages is a judgment task rather than a throughput
+# one.
+#
+# The values are NOT interchangeable between models — they come from each model's
+# own reasoning_options, and the ladders genuinely differ (glm/deepseek top out at
+# "max", muse/qwen at "xhigh"; not every model has all rungs, and some have none).
+# So a variant default is only valid for the model it was chosen for: naming your
+# own model for a seat clears that seat's variant unless you also name a variant,
+# rather than passing an effort the new model may reject. Explicit "" = no variant.
+seat_variant() { # $1 seat env value (unset marker), $2 model-was-overridden, $3 default
+  if [ "$1" != "__unset__" ]; then printf '%s' "$1"; # explicit, including ""
+  elif [ -n "$2" ]; then printf '';                  # custom model, no variant guess
+  else printf '%s' "$3"; fi
+}
+SWE_VARIANT="$(seat_variant "${OPENCODE_REVIEW_SWE_VARIANT-__unset__}" "${OPENCODE_REVIEW_SWE_MODEL:-}" xhigh)"
+ARCH_VARIANT="$(seat_variant "${OPENCODE_REVIEW_ARCH_VARIANT-__unset__}" "${OPENCODE_REVIEW_ARCH_MODEL:-}" max)"
+CHAIR_VARIANT="$(seat_variant "${OPENCODE_REVIEW_CHAIR_VARIANT-__unset__}" "${OPENCODE_REVIEW_CHAIR_MODEL:-}" xhigh)"
+FACTCHECK_VARIANT="$(seat_variant "${OPENCODE_REVIEW_FACTCHECK_VARIANT-__unset__}" "${OPENCODE_REVIEW_FACTCHECK_MODEL:-}" max)"
+# The single-model escape hatch has no default: the model is the caller's choice,
+# so its effort ladder is unknown here.
+SINGLE_VARIANT="${OPENCODE_REVIEW_VARIANT:-}"
 SINGLE_AGENT="${OPENCODE_REVIEW_AGENT:-}"
 TIMEOUT="${OPENCODE_REVIEW_TIMEOUT:-900}"
 # Delay between launching the two parallel members. opencode's session sqlite
@@ -128,6 +179,12 @@ TIMEOUT="${OPENCODE_REVIEW_TIMEOUT:-900}"
 STAGGER="${OPENCODE_REVIEW_STAGGER:-3}"
 
 log() { printf '[opencode-review] %s\n' "$*" >&2; }
+
+# "model" or "model @effort" — the variant changes what a seat produced, so it
+# belongs wherever the model is logged rather than only in the env docs.
+seat_desc() { # $1 model, $2 variant
+  if [ -n "${2:-}" ]; then printf '%s @%s' "$1" "$2"; else printf '%s' "$1"; fi
+}
 
 # ----------------------------------------------------------------- pre-flight
 # Everything below here may call log(), which the assignments above cannot: on
@@ -688,7 +745,127 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/opencode-review-run-XXXXXXXX" 2>/dev/null
     log "ERROR: could not create a private temp directory under ${TMPDIR:-/tmp}."
     exit 1
   }
-trap 'rm -rf "$WORK_DIR"' EXIT
+# --------------------------------------------------- --variant support probe
+# Whether this opencode understands `run --variant` is a fact about the binary,
+# so it is established once per run and reported on EVERY path — not only when
+# something failed.
+#
+# The failure path is the half that does not matter. An argument parser that
+# REJECTS the unknown flag fails every stage at once, and the run is already
+# loud. The dangerous half is a parser that IGNORES it: every stage succeeds, the
+# committee runs at its models' default effort, and the log says `@xhigh` — a
+# report that is quietly worse than the one it claims to be, with nothing
+# anywhere saying so. A check that only runs after a failure cannot see that case
+# by construction.
+#
+# So it runs on the happy path too, and the ~6s it costs is spent in the
+# BACKGROUND, concurrently with phase 1, which takes minutes. The verdict is
+# harvested at the end by report_variant_support, where it is needed. Nothing
+# waits on it, and a run that passes no variant at all never starts it.
+#
+# Scoped to the variants THIS RUN will actually pass, which is decided by the mode
+# below: the --agent escape hatch passes none (the agent carries its own model and
+# effort), the single-model path passes only its own, and the committee passes the
+# four seats' — minus fact-check when that phase is switched off. Summing all of
+# them regardless would arm the warning for a flag the run never used.
+if [ -n "$SINGLE_AGENT" ]; then
+  VARIANTS_REQUESTED=""
+elif [ -n "$SINGLE_MODEL" ]; then
+  VARIANTS_REQUESTED="$SINGLE_VARIANT"
+else
+  VARIANTS_REQUESTED="${SWE_VARIANT}${ARCH_VARIANT}${CHAIR_VARIANT}"
+  [ "$FACTCHECK_ENABLED" != "0" ] && VARIANTS_REQUESTED="${VARIANTS_REQUESTED}${FACTCHECK_VARIANT}"
+fi
+#
+# BOUNDED, on both branches. report_variant_support waits on this pid, so an
+# unbounded probe would be strictly worse than no probe: every stage could finish
+# and the report be ready, and the run would still never return — a hang
+# introduced by a diagnostic, on the happy path, for a machine that already has
+# no timeout(1). Where timeout(1) exists it does the work; where it does not, the
+# same built-in watchdog oc_run and diagnose_models use does. A probe killed
+# either way leaves an empty capture, which report_variant_support already reads
+# as "claim nothing".
+#
+# SELF-CONTAINED, which is the part the shape here exists for. The whole probe —
+# the call, its watchdog, and the reaping of both — is one background unit, and
+# the main shell tracks only the wrapper.
+#
+# The obvious spelling, a bare `opencode run --help &` plus a sleep-then-kill
+# watchdog held in a variable, is wrong HERE in a way it is not wrong in oc_run.
+# oc_run waits for its process and cancels its watchdog on the next line; this
+# probe is deliberately harvested at the END of the run, minutes later. A
+# sleep(30) watchdog whose cancellation is deferred that long is not guarding
+# anything for most of its life — the probe finishes in ~6s — and bash reaps
+# background children eagerly rather than leaving zombies that hold their pid, so
+# by the time the watchdog woke it could TERM a pid the kernel had since handed
+# to someone else. Measured, not assumed: `sleep 0.2 & p=$!; sleep 1; kill -0 $p`
+# already fails, well before any `wait`.
+#
+# Reaping inside the wrapper closes that. The watchdog is cancelled the instant
+# the probe exits, so the window where its target pid is stale is the microseconds
+# between the inner `wait` returning and the `kill` on the next line — the same
+# residual oc_run has, rather than a multi-minute one. Cancelling it really does
+# disarm it: killing the watchdog shell leaves its `sleep` orphaned, but the
+# `kill -TERM` after that sleep is a line the dead shell never reaches. Verified
+# by letting a cancelled watchdog's deadline pass and checking it never fired.
+# The stray sleep exits on its own and signals nothing.
+#
+# It also means the probe stays bounded if the run exits early and the trap kills
+# the wrapper: the orphaned watchdog is then still armed and fires, so the unit
+# cleans itself up either way.
+VARIANT_PROBE_TIMEOUT=30
+VARIANT_PROBE_OUT="$WORK_DIR/variant-help.out"
+VARIANT_PROBE_PID=""
+if [ -n "$VARIANTS_REQUESTED" ]; then
+  if [ -n "$TIMEOUT_BIN" ]; then
+    "$TIMEOUT_BIN" "$VARIANT_PROBE_TIMEOUT" opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
+  else
+    (
+      opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
+      _probe=$!
+      (
+        sleep "$VARIANT_PROBE_TIMEOUT"
+        kill -TERM "$_probe" 2>/dev/null
+        sleep 3
+        kill -KILL "$_probe" 2>/dev/null
+      ) &
+      _wd=$!
+      wait "$_probe" 2>/dev/null
+      kill "$_wd" 2>/dev/null
+    ) &
+  fi
+  VARIANT_PROBE_PID=$!
+fi
+trap 'rm -rf "$WORK_DIR"; [ -n "${VARIANT_PROBE_PID:-}" ] && kill "$VARIANT_PROBE_PID" 2>/dev/null; :' EXIT
+
+# Reports the probe's verdict. Called once, last, on every exit path that ran
+# stages — success and failure alike.
+#
+# It states what the binary does, and deliberately does not attribute a failure
+# to it. Attribution was the earlier version's other bug: it fired whenever ANY
+# seat's variant was non-empty, so a single-model run with no variant, or a
+# custom-model seat whose variant was deliberately cleared, could be told that a
+# missing --variant explained a failure it had no part in. What ran is knowable;
+# why a given stage died is not, from here.
+#
+# Silence on an unreadable probe, for the same reason diagnose_models bails on a
+# truncated listing: empty output would otherwise "prove" the flag missing on any
+# machine where --help itself failed.
+report_variant_support() {
+  # One pid to wait on: the wrapper has already reaped the probe and cancelled
+  # its watchdog by the time it exits.
+  [ -n "$VARIANT_PROBE_PID" ] || return 0
+  wait "$VARIANT_PROBE_PID" 2>/dev/null
+  VARIANT_PROBE_PID=""
+  local help
+  help="$(cat "$VARIANT_PROBE_OUT" 2>/dev/null)"
+  [ -n "$help" ] || return 0
+  case "$help" in
+    *--variant*) return 0 ;;
+  esac
+  log "WARN: this 'opencode' has no 'run --variant' flag. The reasoning effort logged above as '@...' was therefore NOT applied — each stage ran at its model's default effort, whatever the log line said."
+  log "WARN: upgrade opencode, or set OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_VARIANT=\"\" to stop passing a flag this binary does not take."
+}
 
 swe_out="$WORK_DIR/swe.out"
 arch_out="$WORK_DIR/arch.out"
@@ -702,9 +879,18 @@ chair_rep="$WORK_DIR/chair.rep"
 fc_rep="$WORK_DIR/fc.rep"
 single_rep="$WORK_DIR/single.rep"
 
-# oc_run <flag> <value> <message> <outfile>
+# oc_run <flag> <value> <message> <outfile> [variant]
 # Runs one opencode invocation headlessly (flag is --model or --agent), capturing
 # its JSON event stream to <outfile>, one event per line.
+#
+# <variant> is the reasoning effort passed as `--variant`. Empty (the default)
+# means the flag is not passed at all rather than passed empty: opencode reads a
+# variant name against the model's own ladder, and "" is not a rung on any of
+# them. It is built as an ARRAY so an empty one expands to no words — the older
+# `${var:+--variant $var}` spelling would word-split a value with a space in it.
+#
+# Whether the installed opencode takes the flag at all is established separately,
+# by the background probe above; see report_variant_support.
 #
 # `--format json` is what makes the report recoverable at all. The default format
 # is a rendered transcript in which the model's prose, tool output, tool errors
@@ -725,15 +911,18 @@ single_rep="$WORK_DIR/single.rep"
 # stdin is /dev/null: with stdin left attached, `opencode run` waits on it and the
 # run hangs until the timeout fires, having produced no output at all.
 oc_run() {
-  local flag="$1" val="$2" msg="$3" out="$4" st td pid wpid
+  local flag="$1" val="$2" msg="$3" out="$4" variant="${5:-}" st td pid wpid
+  local vopt=()
+  [ -n "$variant" ] && vopt=(--variant "$variant")
   if [ -n "$TIMEOUT_BIN" ]; then
     GIT_PAGER=cat GH_PAGER=cat PAGER=cat OPENCODE_PERMISSION="$PERM" \
-      "$TIMEOUT_BIN" "$TIMEOUT" opencode run --pure --format json "$flag" "$val" "$msg" \
-      </dev/null >"$out" 2>"${out}.err"
+      "$TIMEOUT_BIN" "$TIMEOUT" opencode run --pure --format json "$flag" "$val" \
+      ${vopt[@]+"${vopt[@]}"} "$msg" </dev/null >"$out" 2>"${out}.err"
     return $?
   fi
   GIT_PAGER=cat GH_PAGER=cat PAGER=cat OPENCODE_PERMISSION="$PERM" \
-    opencode run --pure --format json "$flag" "$val" "$msg" </dev/null >"$out" 2>"${out}.err" &
+    opencode run --pure --format json "$flag" "$val" ${vopt[@]+"${vopt[@]}"} "$msg" \
+    </dev/null >"$out" 2>"${out}.err" &
   pid=$!
   # Timeout sentinel: the watchdog creates this path to signal that it fired, so
   # its EXISTENCE is the signal and it starts out deleted.
@@ -856,7 +1045,7 @@ diagnose_models() { # $@ = the model ids whose stages failed
   # Exact whole-line match. Verified against the real command: one id per line,
   # no header, no ANSI once stdout is a pipe, and — the part that matters for a
   # routed setup — ids carry their provider prefix verbatim, so the prefixed
-  # `omniroute/opencode-go/glm-5.3` this script builds is exactly what is listed.
+  # `omniroute/opencode-go/glm-5.3-flash` this script builds is exactly what is listed.
   for m in "$@"; do
     [ -n "$m" ] || continue
     printf '%s\n' "$avail" | grep -qxF -- "$m" || missing="${missing} ${m}"
@@ -873,6 +1062,7 @@ diagnose_models() { # $@ = the model ids whose stages failed
   log "diag  : that alone accounts for an empty report — opencode reports only a generic server error for an unusable model id, never naming it."
   log "diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL, or set OPENCODE_REVIEW_PROVIDER=<id> if they sit behind a router. Run 'opencode models' to see what is configured."
 }
+
 
 # ------------------------------------------------------------ report extraction
 # A stage's report is the model's own prose, and the JSON event stream says which
@@ -1178,10 +1368,10 @@ fi
 
 if [ -n "$SINGLE_MODEL" ]; then
   log "scope : ${SCOPE}"
-  log "mode  : single model '${SINGLE_MODEL}' (SWE persona)"
+  log "mode  : single model '$(seat_desc "$SINGLE_MODEL" "$SINGLE_VARIANT")' (SWE persona)"
   [ -z "$TIMEOUT_BIN" ] && log "note  : no 'timeout'/'gtimeout'; built-in watchdog (${TIMEOUT}s)."
   echo "===== OPENCODE REVIEW (model ${SINGLE_MODEL}) — ${SCOPE} ====="
-  oc_run --model "$SINGLE_MODEL" "$(member_msg "$(read_prompt "$PROMPTS_DIR/swe.md")")" "$single_out"
+  oc_run --model "$SINGLE_MODEL" "$(member_msg "$(read_prompt "$PROMPTS_DIR/swe.md")")" "$single_out" "$SINGLE_VARIANT"
   st=$?
   extract_report "$single_out" "$single_rep" "single-model"
   ex=$?
@@ -1190,6 +1380,7 @@ if [ -n "$SINGLE_MODEL" ]; then
   echo "===== END OF REVIEW ====="
   log "single-model review: $(stage_note "$st" "$ex" "$single_stop")"
   { [ "$st" -ne 0 ] || [ "$ex" -eq 2 ]; } && diagnose_models "$SINGLE_MODEL"
+  report_variant_support
   [ "$st" -eq 0 ] && [ "$ex" -eq 2 ] && st=1
   exit "$st"
 fi
@@ -1200,7 +1391,7 @@ ARCH_PERSONA="$(read_prompt "$PROMPTS_DIR/architect.md")"
 CHAIR_PERSONA="$(read_prompt "$PROMPTS_DIR/chair.md")"
 
 log "scope : ${SCOPE}"
-log "mode  : committee — swe(${SWE_MODEL}) + architect(${ARCH_MODEL}) -> chair(${CHAIR_MODEL})"
+log "mode  : committee — swe($(seat_desc "$SWE_MODEL" "$SWE_VARIANT")) + architect($(seat_desc "$ARCH_MODEL" "$ARCH_VARIANT")) -> chair($(seat_desc "$CHAIR_MODEL" "$CHAIR_VARIANT"))"
 [ -z "$TIMEOUT_BIN" ] && log "note  : no 'timeout'/'gtimeout'; built-in watchdog (${TIMEOUT}s per model)."
 
 echo "===== OPENCODE COMMITTEE REVIEW — ${SCOPE} ====="
@@ -1208,10 +1399,10 @@ echo "===== OPENCODE COMMITTEE REVIEW — ${SCOPE} ====="
 # Phase 1 — the two members review the same target in parallel, launched a few
 # seconds apart so they don't collide on opencode's session-init DB lock.
 log "phase 1: swe + architect (parallel, ${STAGGER}s stagger)"
-oc_run --model "$SWE_MODEL" "$(member_msg "$SWE_PERSONA")" "$swe_out" &
+oc_run --model "$SWE_MODEL" "$(member_msg "$SWE_PERSONA")" "$swe_out" "$SWE_VARIANT" &
 swe_job=$!
 sleep "$STAGGER"
-oc_run --model "$ARCH_MODEL" "$(member_msg "$ARCH_PERSONA")" "$arch_out" &
+oc_run --model "$ARCH_MODEL" "$(member_msg "$ARCH_PERSONA")" "$arch_out" "$ARCH_VARIANT" &
 arch_job=$!
 wait "$swe_job"
 swe_st=$?
@@ -1262,7 +1453,7 @@ chair_msg="$(printf '%s\n\n===== SWE report (correctness/bugs/security) [%s] ===
   "$(stage_note "$arch_st" "$arch_ex" "$arch_stop")" "$(cat "$arch_rep")" \
   "$MSG")"
 log "phase 2: chair prompt is $(printf '%s' "$chair_msg" | wc -c | tr -d ' ') B (swe report $(wc -c <"$swe_rep" | tr -d ' ') B of $(wc -c <"$swe_out" | tr -d ' ') B captured, architect $(wc -c <"$arch_rep" | tr -d ' ') B of $(wc -c <"$arch_out" | tr -d ' ') B)"
-oc_run --model "$CHAIR_MODEL" "$chair_msg" "$chair_out"
+oc_run --model "$CHAIR_MODEL" "$chair_msg" "$chair_out" "$CHAIR_VARIANT"
 chair_st=$?
 extract_report "$chair_out" "$chair_rep" "chair"
 chair_ex=$?
@@ -1278,7 +1469,7 @@ fc_perr=""
 fc_ex=0
 fc_applied=0
 if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "0" ]; then
-  log "phase 3: fact-check (${FACTCHECK_MODEL})"
+  log "phase 3: fact-check ($(seat_desc "$FACTCHECK_MODEL" "$FACTCHECK_VARIANT"))"
   FACTCHECK_PERSONA="$(read_prompt "$PROMPTS_DIR/factcheck.md")"
 
   # The diff goes in the message. Truncation is announced in the text rather than
@@ -1303,7 +1494,7 @@ if [ "$chair_st" -eq 0 ] && [ "$chair_ex" -ne 2 ] && [ "$FACTCHECK_ENABLED" != "
 
   fc_msg="$(printf '%s\n\n===== Chair report to fact-check =====\n%s\n\n===== The diff under review (this is the ONLY evidence you may falsify against) =====\n%s\n' \
     "$FACTCHECK_PERSONA" "$(cat "$chair_rep")" "$fc_diff")"
-  oc_run --model "$FACTCHECK_MODEL" "$fc_msg" "$fc_out"
+  oc_run --model "$FACTCHECK_MODEL" "$fc_msg" "$fc_out" "$FACTCHECK_VARIANT"
   fc_st=$?
   extract_report "$fc_out" "$fc_rep" "factcheck"
   fc_ex=$?
@@ -1410,4 +1601,5 @@ else
     status=3
   fi
 fi
+report_variant_support
 exit "$status"
