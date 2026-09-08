@@ -745,7 +745,75 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/opencode-review-run-XXXXXXXX" 2>/dev/null
     log "ERROR: could not create a private temp directory under ${TMPDIR:-/tmp}."
     exit 1
   }
-trap 'rm -rf "$WORK_DIR"' EXIT
+# --------------------------------------------------- --variant support probe
+# Whether this opencode understands `run --variant` is a fact about the binary,
+# so it is established once per run and reported on EVERY path — not only when
+# something failed.
+#
+# The failure path is the half that does not matter. An argument parser that
+# REJECTS the unknown flag fails every stage at once, and the run is already
+# loud. The dangerous half is a parser that IGNORES it: every stage succeeds, the
+# committee runs at its models' default effort, and the log says `@xhigh` — a
+# report that is quietly worse than the one it claims to be, with nothing
+# anywhere saying so. A check that only runs after a failure cannot see that case
+# by construction.
+#
+# So it runs on the happy path too, and the ~6s it costs is spent in the
+# BACKGROUND, concurrently with phase 1, which takes minutes. The verdict is
+# harvested at the end by report_variant_support, where it is needed. Nothing
+# waits on it, and a run that passes no variant at all never starts it.
+#
+# Scoped to the variants THIS RUN will actually pass, which is decided by the mode
+# below: the --agent escape hatch passes none (the agent carries its own model and
+# effort), the single-model path passes only its own, and the committee passes the
+# four seats' — minus fact-check when that phase is switched off. Summing all of
+# them regardless would arm the warning for a flag the run never used.
+if [ -n "$SINGLE_AGENT" ]; then
+  VARIANTS_REQUESTED=""
+elif [ -n "$SINGLE_MODEL" ]; then
+  VARIANTS_REQUESTED="$SINGLE_VARIANT"
+else
+  VARIANTS_REQUESTED="${SWE_VARIANT}${ARCH_VARIANT}${CHAIR_VARIANT}"
+  [ "$FACTCHECK_ENABLED" != "0" ] && VARIANTS_REQUESTED="${VARIANTS_REQUESTED}${FACTCHECK_VARIANT}"
+fi
+VARIANT_PROBE_OUT="$WORK_DIR/variant-help.out"
+VARIANT_PROBE_PID=""
+if [ -n "$VARIANTS_REQUESTED" ]; then
+  if [ -n "$TIMEOUT_BIN" ]; then
+    "$TIMEOUT_BIN" 30 opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
+  else
+    opencode run --help >"$VARIANT_PROBE_OUT" 2>&1 &
+  fi
+  VARIANT_PROBE_PID=$!
+fi
+trap 'rm -rf "$WORK_DIR"; [ -n "${VARIANT_PROBE_PID:-}" ] && kill "$VARIANT_PROBE_PID" 2>/dev/null; :' EXIT
+
+# Reports the probe's verdict. Called once, last, on every exit path that ran
+# stages — success and failure alike.
+#
+# It states what the binary does, and deliberately does not attribute a failure
+# to it. Attribution was the earlier version's other bug: it fired whenever ANY
+# seat's variant was non-empty, so a single-model run with no variant, or a
+# custom-model seat whose variant was deliberately cleared, could be told that a
+# missing --variant explained a failure it had no part in. What ran is knowable;
+# why a given stage died is not, from here.
+#
+# Silence on an unreadable probe, for the same reason diagnose_models bails on a
+# truncated listing: empty output would otherwise "prove" the flag missing on any
+# machine where --help itself failed.
+report_variant_support() {
+  [ -n "$VARIANT_PROBE_PID" ] || return 0
+  wait "$VARIANT_PROBE_PID" 2>/dev/null
+  VARIANT_PROBE_PID=""
+  local help
+  help="$(cat "$VARIANT_PROBE_OUT" 2>/dev/null)"
+  [ -n "$help" ] || return 0
+  case "$help" in
+    *--variant*) return 0 ;;
+  esac
+  log "WARN: this 'opencode' has no 'run --variant' flag. The reasoning effort logged above as '@...' was therefore NOT applied — each stage ran at its model's default effort, whatever the log line said."
+  log "WARN: upgrade opencode, or set OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_VARIANT=\"\" to stop passing a flag this binary does not take."
+}
 
 swe_out="$WORK_DIR/swe.out"
 arch_out="$WORK_DIR/arch.out"
@@ -768,6 +836,9 @@ single_rep="$WORK_DIR/single.rep"
 # variant name against the model's own ladder, and "" is not a rung on any of
 # them. It is built as an ARRAY so an empty one expands to no words — the older
 # `${var:+--variant $var}` spelling would word-split a value with a space in it.
+#
+# Whether the installed opencode takes the flag at all is established separately,
+# by the background probe above; see report_variant_support.
 #
 # `--format json` is what makes the report recoverable at all. The default format
 # is a rendered transcript in which the model's prose, tool output, tool errors
@@ -940,32 +1011,6 @@ diagnose_models() { # $@ = the model ids whose stages failed
   log "diag  : name models you do have via OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL, or set OPENCODE_REVIEW_PROVIDER=<id> if they sit behind a router. Run 'opencode models' to see what is configured."
 }
 
-# The other way a stage can fail for a reason that is not the model: this script
-# passes `--variant`, and an opencode predating that flag has no reason to accept
-# it. Checked on the failure path only, alongside diagnose_models and for the same
-# reason — `opencode run --help` costs ~6s, which is free once something is
-# already broken and not worth paying on every clean run. Two ways to lose here,
-# both silent on their own: an argument parser that rejects the unknown flag fails
-# every stage at once, and one that ignores it runs the whole committee at default
-# effort while the log claims an effort. Neither says "variant".
-diagnose_variant() {
-  local vs help
-  vs="${SWE_VARIANT}${ARCH_VARIANT}${CHAIR_VARIANT}${FACTCHECK_VARIANT}${SINGLE_VARIANT}"
-  [ -n "$vs" ] || return 0
-  if [ -n "$TIMEOUT_BIN" ]; then
-    help="$("$TIMEOUT_BIN" 20 opencode run --help 2>&1)"
-  else
-    help="$(opencode run --help 2>&1)"
-  fi
-  # Only claim the negative when the help text was actually read: empty output
-  # would otherwise "prove" the flag missing on any machine where --help failed.
-  [ -n "$help" ] || return 0
-  case "$help" in
-    *--variant*) return 0 ;;
-  esac
-  log "diag  : this 'opencode' has no --variant flag, which this script passes for every seat's reasoning effort."
-  log "diag  : upgrade opencode, or set OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_VARIANT=\"\" to stop passing it."
-}
 
 # ------------------------------------------------------------ report extraction
 # A stage's report is the model's own prose, and the JSON event stream says which
@@ -1282,7 +1327,8 @@ if [ -n "$SINGLE_MODEL" ]; then
   cat "$single_rep"
   echo "===== END OF REVIEW ====="
   log "single-model review: $(stage_note "$st" "$ex" "$single_stop")"
-  { [ "$st" -ne 0 ] || [ "$ex" -eq 2 ]; } && { diagnose_models "$SINGLE_MODEL"; diagnose_variant; }
+  { [ "$st" -ne 0 ] || [ "$ex" -eq 2 ]; } && diagnose_models "$SINGLE_MODEL"
+  report_variant_support
   [ "$st" -eq 0 ] && [ "$ex" -eq 2 ] && st=1
   exit "$st"
 fi
@@ -1472,7 +1518,7 @@ else
   # Unquoted on purpose: this is a space-separated list being split into args,
   # and model ids cannot contain whitespace or globbing characters.
   # shellcheck disable=SC2086
-  [ -n "$diag_models" ] && { diagnose_models $diag_models; diagnose_variant; }
+  [ -n "$diag_models" ] && diagnose_models $diag_models
 
   # Exit 3 means: a stage failed because the PROVIDER returned an error, for a
   # model the provider does have. That is all it means, and the wording below is
@@ -1503,4 +1549,5 @@ else
     status=3
   fi
 fi
+report_variant_support
 exit "$status"

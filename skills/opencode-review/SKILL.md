@@ -299,8 +299,21 @@ common cause on their own:
   without one, point `OPENCODE_REVIEW_{SWE,ARCH,CHAIR,FACTCHECK}_MODEL` at models from
   `opencode models`, or set `OPENCODE_REVIEW_PROVIDER` if the same models sit behind a router.
   Doing either clears that seat's reasoning-effort default, since effort names are per-model.
-- An `opencode` new enough to have `run --variant`. If it is not, the diagnosis on the
-  failure path says so by name — nothing else in the run mentions the flag.
+- An `opencode` new enough to have `run --variant`. If it is not, the run says so on its
+  **last line**, on the success path as well as the failure path:
+
+  ```
+  [opencode-review] WARN: this 'opencode' has no 'run --variant' flag. The reasoning effort
+                          logged above as '@...' was therefore NOT applied — each stage ran
+                          at its model's default effort, whatever the log line said.
+  ```
+
+  Reporting it on a *clean* run is the point. A parser that rejects the unknown flag fails
+  every stage at once and is already loud; the dangerous case is one that ignores it, where
+  every stage succeeds at default effort and the log claims `@xhigh` — a report quietly worse
+  than the one it says it is. The check costs ~6s and runs in the **background**, concurrently
+  with phase 1, so a clean run pays nothing in wall-clock; a run that passes no variant never
+  starts it. It reports what the binary does, and does not blame any particular failure on it.
 - **`jq` or `python3` is on `PATH`** — one of them reads opencode's JSON events. Checked at
   startup, so a missing reader fails immediately with that message rather than as four empty
   stages.
