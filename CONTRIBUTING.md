@@ -30,7 +30,7 @@ under [`skills/`](./skills) that follows the [Agent Skills](https://docs.claude.
    skills/<skill-name>/
      SKILL.md          # required
      references/       # deep-dive docs the skill loads on demand
-     scripts/          # executable helpers (chmod +x; commit the bit)
+     scripts/          # helpers; the ones you invoke are chmod +x (commit the bit)
      assets/           # checklists, templates, etc.
    ```
 
@@ -40,7 +40,9 @@ under [`skills/`](./skills) that follows the [Agent Skills](https://docs.claude.
 - **`description`** is the most important field — it is what an agent reads to decide whether
   to invoke the skill. Cover the *when* (triggers) and the *when not*.
 - Keep `SKILL.md` focused; push long material into `references/` so it loads only when needed.
-- Make scripts executable (`chmod +x`) and commit the executable bit so they run after a clone.
+- Make the scripts you **invoke** executable (`chmod +x`) and commit the bit, so they run after a
+  clone. Leave files you **source** (a shared `scripts/lib/*.sh`, say) non-executable: the bit is
+  how a reader tells which files are entry points.
 - Don't commit machine-local config (e.g. `.claude/settings.local.json`) — it's gitignored.
 
 ## Third-party content
