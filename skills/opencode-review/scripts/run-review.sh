@@ -690,7 +690,14 @@ dep_dirs() {
   [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"
   d="${CARGO_HOME:-$HOME/.cargo}/registry"
   [ -d "$d" ] && printf '%s\n' "$d"
-  printf '%s' "${OPENCODE_REVIEW_DEP_DIRS:-}" | tr ':' '\n' | while IFS= read -r d; do
+  # printf '%s\n', not '%s': without the trailing newline `tr` leaves the LAST
+  # field unterminated, `read` returns non-zero on it, and the loop exits before
+  # the body runs for it — so the last path was always dropped, and with a single
+  # path (the common case, and the one #24 added this for) the variable did
+  # nothing at all. The two caches above escape this only because they already
+  # print a newline. The extra empty line an unset variable now produces is eaten
+  # by the `[ -n "$d" ]` guard.
+  printf '%s\n' "${OPENCODE_REVIEW_DEP_DIRS:-}" | tr ':' '\n' | while IFS= read -r d; do
     [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"
   done
 }
