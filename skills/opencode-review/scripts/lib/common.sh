@@ -281,7 +281,27 @@ EXT_DIR_RULES="$(external_dirs_rules)"
 
 # The bash map is kept as a single-quoted literal so patterns like "*$(*" are not
 # touched by the shell; only the outer object is assembled.
-PERM_BASH='{"*":"deny","git diff*":"allow","git show*":"allow","git log*":"allow","git status*":"allow","git ls-files*":"allow","git rev-parse*":"allow","git blame*":"allow","git grep*":"allow","cat *":"allow","head *":"allow","tail *":"allow","wc *":"allow","ls":"allow","ls *":"allow","grep *":"allow","rg *":"allow","*;*":"deny","*|*":"deny","*&*":"deny","*>*":"deny","*`*":"deny","*$(*":"deny","*<(*":"deny","*\n*":"deny"}'
+#
+# opencode matches this map per SHELL SEGMENT, not against the whole command
+# string: it splits on ";", "&&" and "|" and every segment must hit an allow
+# pattern on its own. That is what actually enforces the read-only set —
+# `cat f | wc -l` runs because both halves are allowed, `ls | xargs cat` is
+# refused because `xargs` is not. Measured, not assumed (issue #46).
+#
+# Two consequences, both counter-intuitive enough to be worth writing down:
+#   - "*;*", "*|*" and "*&*" deny patterns are DEAD. The separator is consumed by
+#     the split, so no segment ever contains one and the pattern never matches.
+#     They were in this map until #46 and refused nothing in their whole life.
+#   - What they DID match was a separator inside a quoted argument, where the
+#     shell split leaves it in place: `git grep -n "A\|B"` — an ordinary
+#     alternation — was denied as if it were command chaining. In the run that
+#     produced the #46 evidence that misfire accounted for seven of eight
+#     denials and cost one seat its entire report. Removing the three patterns is
+#     what lets a multi-pattern grep through; single "&" is still refused, because
+#     opencode splits on it too (`ls & pwd` and `ls&pwd` were both measured denied).
+# The redirect, backtick, $(...) and <(...) denies are kept: those were measured
+# refusing what they are aimed at.
+PERM_BASH='{"*":"deny","git diff*":"allow","git show*":"allow","git log*":"allow","git status*":"allow","git ls-files*":"allow","git rev-parse*":"allow","git blame*":"allow","git grep*":"allow","cat *":"allow","head *":"allow","tail *":"allow","wc *":"allow","ls":"allow","ls *":"allow","grep *":"allow","rg *":"allow","*>*":"deny","*`*":"deny","*$(*":"deny","*<(*":"deny","*\n*":"deny"}'
 PERM="{\"edit\":\"deny\",\"question\":\"deny\",\"doom_loop\":\"deny\",\"webfetch\":\"deny\",\"websearch\":\"deny\",\"task\":\"deny\",\"skill\":\"deny\",\"lsp\":\"deny\",${EXT_DIR_RULES}\"bash\":${PERM_BASH}}"
 
 # ------------------------------------------- readable paths outside the repo

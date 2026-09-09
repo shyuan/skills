@@ -127,6 +127,32 @@ what `tester` is for.
   path is resolved from `GOMODCACHE`/`GOPATH`/the `go env` file rather than by running
   `go env`: the script has to run PATH-resolved `git` and `opencode` from the repo root
   before any permission set exists, but an optional convenience should not widen that.
+- **How the bash map is actually matched — measured (#46).** opencode matches it per *shell
+  segment*, splitting on `;`, `&`, `&&` and `|` and requiring every segment to hit an allow
+  pattern on its own. `cat f | wc -l` runs because both halves are allowed; `ls | xargs cat` is
+  refused because `xargs` is not. A single `&` splits like the rest — `ls & pwd` and `ls&pwd` were
+  both measured denied — so backgrounding is not a way around it either. That split is what
+  enforces the read-only set, and it has two consequences worth stating plainly, because both
+  were got wrong here for a long time:
+  - `"*;*"`, `"*|*"` and `"*&*"` deny patterns are **dead**. The separator is consumed by the
+    split, so no segment ever contains one. They sat in this map refusing nothing until #46
+    removed them. What they *did* catch was a separator inside a quoted argument, which the split
+    leaves in place: `git grep -n "A\|B"` — an ordinary alternation — was rejected as if it were
+    command chaining. In the run that produced the #46 evidence that misfire was seven of the
+    eight denials in the whole review, and it cost one seat its entire report: the architect spent
+    four of its thirty-one tool calls on rejected greps, never wrote anything, and timed out.
+    The `>`, backtick, `$(...)` and `<(...)` denies were measured refusing what they aim at, and
+    stay.
+  - Removing the read commands would not close the path boundary, so it is not worth its cost.
+    `"git diff*"` is on the allow-list, and `git diff --no-index -- /dev/null /bin/ls` prints the
+    contents of any file on the machine; the architect found that on its own in the same run. The
+    honest description is that **this is an allow-list of commands, not a path sandbox**, and
+    `external_directory` is the only path-enforced boundary there is — over the file tools alone.
+  - The one legitimate use of a repo-external bash read is recovering opencode's own truncated
+    tool output: a `git show` of a large file spills its full text to
+    `~/.local/share/opencode/tool-output/<id>`, which is not in `external_directory`, so bash is
+    the only way back to the half that was cut. Two seats did exactly this and nothing else
+    outside the repo. The personas now name that use and say there is no other.
 - **What is readable is asked, not assumed.** `OPENCODE_PERMISSION` is *merged* with the saved
   config and `external_directory` merges deep, so a path allowed in your global config or the
   project's `opencode.json` is readable to the file tools as well — something the caches above
