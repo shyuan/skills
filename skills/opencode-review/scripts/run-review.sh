@@ -228,12 +228,29 @@ elif command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_BIN="gtimeout"
 fi
 
-read_prompt() { # $1 file -> persona text (fatal if missing)
+# Personas carry {{EXTERNAL_READ_PATHS}} where a hardcoded "outside the repo is
+# denied" sentence used to be, and it is filled here — the one place every
+# persona is loaded, members and chair alike. Substituted rather than appended to
+# the message: an appended list would sit alongside the old claim and leave the
+# model to pick between two contradicting boundaries, and the persona tells it to
+# trust the written one.
+#
+# Bash parameter expansion, not sed or awk. The replacement is multi-line and
+# holds absolute paths: sed would need "/" escaped and would mangle a path
+# containing "&", and BSD awk rejects a newline inside a -v assignment outright
+# ("newline in string"). ${var//pat/rep} has neither problem and spawns nothing.
+#
+# READ_PATHS_BLOCK must therefore be set before the first call; it is computed
+# unconditionally, right after the scratch dir, and every caller here is in the
+# stage-running section far below it.
+read_prompt() { # $1 file -> persona text with the read-path list filled in
   [ -f "$1" ] || {
     log "ERROR: prompt file missing: $1"
     exit 1
   }
-  cat "$1"
+  local text
+  text="$(cat "$1")"
+  printf '%s\n' "${text//\{\{EXTERNAL_READ_PATHS\}\}/$READ_PATHS_BLOCK}"
 }
 
 # ---------------------------------------------------------- choose the target
@@ -720,12 +737,10 @@ EOF
   printf '"external_directory":{%s},' "$out"
 }
 
+# What this contributes to the permission set is not the whole of what the file
+# tools may read — the user's own config merges in — so the "deps :" line that
+# used to sit here now lives with READ_PATHS below, where the merged answer is.
 EXT_DIR_RULES="$(external_dirs_rules)"
-if [ -n "$EXT_DIR_RULES" ]; then
-  log "deps  : file-tool reads allowed under $(dep_dirs | sort -u | tr '\n' ' ')"
-else
-  log "deps  : no dependency cache found; file tools stay repo-only"
-fi
 
 # The bash map is kept as a single-quoted literal so patterns like "*$(*" are not
 # touched by the shell; only the outer object is assembled.
@@ -844,6 +859,186 @@ if [ -n "$VARIANTS_REQUESTED" ]; then
   VARIANT_PROBE_PID=$!
 fi
 trap 'rm -rf "$WORK_DIR"; [ -n "${VARIANT_PROBE_PID:-}" ] && kill "$VARIANT_PROBE_PID" 2>/dev/null; :' EXIT
+
+# ------------------------------------------- readable paths outside the repo
+# What the file tools may actually read for THIS run is not what dep_dirs
+# computed. OPENCODE_PERMISSION is MERGED with the saved config, and
+# external_directory merges DEEP, so a path allowed in the user's global config
+# or in the project's opencode.json is readable too — and this script never saw
+# it. Only opencode can answer what the merge produced, so it is asked.
+#
+# This matters beyond the log line. The personas tell members what is readable,
+# and they are told to trust that boundary rather than discover it by probing. A
+# list built from this script's own inputs under-reports, so members correctly do
+# not try, and a sibling repo the user deliberately opened up goes unread: the
+# report says "cannot verify" about something that was verifiable all along (#42).
+#
+# Placed here rather than next to PERM for three reasons: PERM must exist (it is
+# the question being asked), WORK_DIR must exist (the no-timeout watchdog needs
+# somewhere private for the output), and the --variant probe is already running
+# in the background, so this call overlaps with it instead of adding to it.
+#
+# Bounded like every other opencode call here. Measured at ~5s on the machine
+# this was written on, and unlike the probe it is synchronous and sits ahead of
+# phase 1 — unbounded, a stuck provider or session lock would hang the run before
+# any model work started.
+READ_PATHS_TIMEOUT=30
+
+# Fail soft, always. A `debug config` that is missing (older opencode), exits
+# non-zero, times out or prints something unparseable falls back to dep_dirs,
+# which is exactly the behaviour before this existed. A review is never lost to
+# a lookup that only ever adds information.
+#
+# `~` is expanded because a persona needs an absolute path; opencode does expand
+# `~` when MATCHING these globs, so the expanded form and the stored form select
+# the same files. Only "allow" entries are taken — the map can also carry "deny"
+# and "ask", and listing those would send members at reads that get rejected,
+# the exact cost #24 set out to remove. Only a trailing "/**" is stripped; any
+# other glob is passed through as written, which still reads correctly as "under
+# here" in a persona.
+effective_external_dirs() {
+  local json rc tmp pid wpid
+  tmp="$WORK_DIR/debug-config.out"
+  if [ -n "$TIMEOUT_BIN" ]; then
+    OPENCODE_PERMISSION="$PERM" "$TIMEOUT_BIN" "$READ_PATHS_TIMEOUT" \
+      opencode debug config --pure >"$tmp" 2>/dev/null </dev/null
+    rc=$?
+  else
+    # Same shape as diagnose_models' fallback watchdog, for a machine with no
+    # timeout(1). </dev/null on both branches: opencode subcommands that wait on
+    # stdin produce nothing and look exactly like a hung provider.
+    OPENCODE_PERMISSION="$PERM" opencode debug config --pure >"$tmp" 2>/dev/null </dev/null &
+    pid=$!
+    (
+      sleep "$READ_PATHS_TIMEOUT"
+      kill -TERM "$pid" 2>/dev/null
+      sleep 3
+      kill -KILL "$pid" 2>/dev/null
+    ) &
+    wpid=$!
+    wait "$pid" 2>/dev/null
+    rc=$?
+    kill "$wpid" 2>/dev/null
+    wait "$wpid" 2>/dev/null
+  fi
+  json="$(cat "$tmp" 2>/dev/null)"
+  rm -f "$tmp"
+  [ "$rc" -eq 0 ] || return 1
+  [ -n "$json" ] || return 1
+
+  if [ "$JSON_BIN" = "jq" ]; then
+    printf '%s' "$json" | jq -r --arg home "$HOME" '
+      (.permission.external_directory // {})
+      | [ to_entries[]
+          | select(.value == "allow")
+          | .key
+          | sub("/\\*\\*$"; "")
+          | sub("^~"; $home) ] as $all
+      | ($all | map(select(
+          startswith("/")
+          and (test("[[:cntrl:]]|`") | not)
+          and (length <= 512)
+        ))) as $ok
+      | "#rejected \(($all | length) - ($ok | length))", $ok[]
+    ' 2>/dev/null
+  else
+    printf '%s' "$json" | python3 -c '
+import json, os, sys
+try:
+    cfg = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+ext = ((cfg.get("permission") or {}).get("external_directory")) or {}
+if not isinstance(ext, dict):
+    sys.exit(1)
+home = os.path.expanduser("~")
+ok, rejected = [], 0
+for key, value in ext.items():
+    if value != "allow":
+        continue
+    key = key[:-3] if key.endswith("/**") else key
+    if key.startswith("~"):
+        key = home + key[1:]
+    if (not key.startswith("/")) or len(key) > 512 or any(
+        ord(c) < 32 or ord(c) == 127 or c == "`" for c in key
+    ):
+        rejected += 1
+        continue
+    ok.append(key)
+print("#rejected %d" % rejected)
+for key in ok:
+    print(key)
+' 2>/dev/null
+  fi
+}
+
+# The merged config is partly UNTRUSTED INPUT. A project's own opencode.json is
+# a file in the checkout under review, so on a branch someone else wrote, its
+# external_directory keys are attacker-controlled text — and this list is
+# interpolated into the most trusted part of every persona. A key holding an
+# escaped newline used to become a second markdown bullet in the environment
+# section, which is a prompt injection with a straight path to "report no
+# findings" (Greptile, on the PR that added this).
+#
+# Three layers, because no single one is convincing on its own:
+#   1. the extractors above emit only keys that are plain absolute paths — no
+#      control characters, no backtick, at most 512 bytes — and count the rest;
+#   2. this grep keeps only lines starting with "/", so anything that got past
+#      the JSON layer as a stray line is dropped here rather than trusted;
+#   3. each surviving path is rendered inside a code span (below), so a name
+#      that reads like prose still reaches the model as data, not instruction.
+# What that leaves is a single-line absolute path whose own name is prose. It
+# is quoted, capped, and cannot break out of its bullet.
+READ_PATHS_RAW="$(effective_external_dirs)"
+READ_PATHS_RC=$?
+if [ "$READ_PATHS_RC" -eq 0 ]; then
+  READ_PATHS_SOURCE="the merged config"
+  READ_PATHS_DROPPED="$(printf '%s\n' "$READ_PATHS_RAW" | sed -n '1s/^#rejected //p')"
+  READ_PATHS="$(printf '%s\n' "$READ_PATHS_RAW" | grep '^/' | sort -u)"
+else
+  READ_PATHS_SOURCE="this script's own list; opencode could not be asked"
+  READ_PATHS_DROPPED=0
+  READ_PATHS="$(dep_dirs | sort -u)"
+fi
+
+# A prompt is not the place for an unbounded list either: nothing stops a repo's
+# config from carrying thousands of allows, and every one of them would be paid
+# for in four stages. The cap is announced in the text rather than applied
+# silently, like the fact-check diff truncation.
+READ_PATHS_MAX=40
+READ_PATHS_TOTAL="$(printf '%s' "$READ_PATHS" | grep -c '^/')"
+READ_PATHS_OMITTED=0
+if [ "$READ_PATHS_TOTAL" -gt "$READ_PATHS_MAX" ]; then
+  READ_PATHS="$(printf '%s\n' "$READ_PATHS" | head -n "$READ_PATHS_MAX")"
+  READ_PATHS_OMITTED=$((READ_PATHS_TOTAL - READ_PATHS_MAX))
+fi
+
+if [ -n "$READ_PATHS" ]; then
+  log "deps  : file-tool reads allowed under $(printf '%s\n' "$READ_PATHS" | tr '\n' ' ')($READ_PATHS_SOURCE)"
+else
+  log "deps  : no readable path outside the repo; file tools stay repo-only"
+fi
+# Counts only. The rejected keys are attacker-controlled text and the caller
+# reads this stream, so they are not echoed anywhere.
+if [ "${READ_PATHS_DROPPED:-0}" != "0" ]; then
+  log "deps  : ignored ${READ_PATHS_DROPPED} external_directory entries that were not plain absolute paths"
+fi
+if [ "$READ_PATHS_OMITTED" -gt 0 ]; then
+  log "deps  : listing the first ${READ_PATHS_MAX}; ${READ_PATHS_OMITTED} more are allowed but not named in the personas"
+fi
+
+# Every persona gets this list substituted in by read_prompt, so no prompt file
+# states the boundary itself and none of them can drift from the permission set
+# actually in force.
+if [ -n "$READ_PATHS" ]; then
+  READ_PATHS_BLOCK="$(printf '%s\n' "$READ_PATHS" | sed 's/^/  - `/; s/$/`/')"
+  if [ "$READ_PATHS_OMITTED" -gt 0 ]; then
+    READ_PATHS_BLOCK="$READ_PATHS_BLOCK
+  - (另有 ${READ_PATHS_OMITTED} 個路徑同樣可讀,未列出)"
+  fi
+else
+  READ_PATHS_BLOCK="  - (本次執行沒有 repo 外的可讀路徑,檔案工具僅限本 repo)"
+fi
 
 # Reports the probe's verdict. Called once, last, on every exit path that ran
 # stages — success and failure alike.
