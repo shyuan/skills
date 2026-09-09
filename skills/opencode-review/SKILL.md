@@ -396,11 +396,28 @@ before touching the other three, and remember to set `OPENCODE_REVIEW_CHAIR_VARI
   path is resolved from `GOMODCACHE`/`GOPATH`/the `go env` file rather than by running
   `go env`: the script has to run PATH-resolved `git` and `opencode` from the repo root
   before any permission set exists, but an optional convenience should not widen that.
+- **What is readable is asked, not assumed.** `OPENCODE_PERMISSION` is *merged* with the saved
+  config and `external_directory` merges deep, so a path allowed in your global config or the
+  project's `opencode.json` is readable to the file tools as well — something the caches above
+  say nothing about. The script therefore asks `opencode debug config --pure`, under the
+  permission set it is about to use, for the merged answer, and it is that list the `deps :`
+  line reports and the personas receive. Only `"allow"` entries are taken (naming a `deny`/`ask`
+  path would send members at reads that get rejected), a trailing `/**` is stripped and `~` is
+  expanded, since a persona needs an absolute path. The call is bounded like every other
+  `opencode` call here and fails soft: on a missing subcommand, a non-zero exit, a timeout or
+  unparseable output the list falls back to the script's own caches and the log says so, so the
+  lookup can only ever add information. It costs one extra `opencode` invocation (~5s, measured)
+  before phase 1, overlapped with the `--variant` probe.
 - **The personas state these boundaries up front** rather than letting models find them by
   hitting them: no test/build execution (that would run code from the untrusted diff), what is
   readable and how, no retrying a rejected call, and — because two members once ended a run on
   a rejected call having written nothing — produce a report regardless, noting what could not
-  be verified.
+  be verified. The readable-path list is not written in the prompt files: they carry a
+  `{{EXTERNAL_READ_PATHS}}` placeholder that `read_prompt` fills for every persona, members and
+  chair alike, so no persona can state a boundary that differs from the one in force. Before
+  this, all three hardcoded "outside the repo is denied" — and, told to trust that rather than
+  probe, reviewers left a sibling repo the user had deliberately allowed unread and reported it
+  as unverifiable (#42).
 - `GIT_PAGER=cat` / `PAGER=cat` stop git from opening a pager that would hang in a non-TTY.
 - The two members run in parallel, then the chair runs once, then the optional fact-check runs
   once — so a large diff can take a few minutes. Each model run has its own timeout; a hung
