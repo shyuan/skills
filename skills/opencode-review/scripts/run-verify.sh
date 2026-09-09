@@ -118,6 +118,7 @@ esac
 ART_DIR=""
 ART_REPORT=""
 ART_DIFF=""
+ART_PINNED=0
 fm_get() { # $1 key -> the value, unquoted
   local v
   v="$(sed -n '2,/^---$/p' "$ART_REPORT" 2>/dev/null | grep "^$1: " | head -1)"
@@ -132,6 +133,7 @@ find_artifact() {
   gitdir="$(git rev-parse --git-dir 2>/dev/null)" || return 1
   root="$gitdir/opencode-review"
   name="${OPENCODE_REVIEW_VERIFY_RUN:-}"
+  [ -n "$name" ] && ART_PINNED=1
   if [ -z "$name" ]; then
     [ -f "$root/latest" ] || return 1
     name="$(cat "$root/latest" 2>/dev/null)"
@@ -158,16 +160,40 @@ gh_pr_number() {
   gh pr view --json number --jq .number 2>/dev/null
 }
 
-gh_findings() { # $1 pr number
+# One of the three reads that make up the gh findings. Its exit status is the
+# whole point: silently dropping a failed read is how a gate whose job is
+# completeness reports "all findings adjudicated" over a subset of them.
+gh_part() { # $1 what it reads (for the message), then the command
+  local label="$1"
+  shift
+  if "$@" 2>"$WORK_DIR/gh.err"; then
+    return 0
+  fi
+  log "ERROR: could not read ${label}: $(tr '\n' ' ' <"$WORK_DIR/gh.err" | cut -c1-200)"
+  return 1
+}
+
+gh_findings() { # $1 pr number -> findings on stdout; non-zero if ANY read failed
   # Body first, then the conversation, then the inline comments. `--jq` uses gh's
   # built-in engine, so this works on a machine where the JSON reader picked for
   # the event stream was python3.
-  gh pr view "$1" --json number,title,body \
-    --jq '"# PR #\(.number): \(.title)\n\n\(.body // "")"' 2>/dev/null
-  gh pr view "$1" --json comments \
-    --jq '.comments[] | "\n----- comment by \(.author.login) (\(.createdAt)) -----\n\(.body)"' 2>/dev/null
-  gh api "repos/{owner}/{repo}/pulls/$1/comments" --paginate \
-    --jq '.[] | "\n----- inline comment on \(.path):\(.line // .original_line // "?") by \(.user.login) -----\n\(.body)"' 2>/dev/null
+  #
+  # A partial read is a failure, not a smaller findings list: the caller cannot
+  # tell "this PR has no inline comments" from "the inline-comment page was rate
+  # limited", and the second one silently drops findings that then come back
+  # adjudicated by omission. All three run before returning, so one call reports
+  # every broken read rather than one per re-run.
+  local rc=0
+  gh_part "the body of PR #$1" \
+    gh pr view "$1" --json number,title,body \
+    --jq '"# PR #\(.number): \(.title)\n\n\(.body // "")"' || rc=1
+  gh_part "the conversation comments on PR #$1" \
+    gh pr view "$1" --json comments \
+    --jq '.comments[] | "\n----- comment by \(.author.login) (\(.createdAt)) -----\n\(.body)"' || rc=1
+  gh_part "the inline review comments on PR #$1" \
+    gh api "repos/{owner}/{repo}/pulls/$1/comments" --paginate \
+    --jq '.[] | "\n----- inline comment on \(.path):\(.line // .original_line // "?") by \(.user.login) -----\n\(.body)"' || rc=1
+  return "$rc"
 }
 
 # --------------------------------------------------------- resolve the findings
@@ -205,6 +231,34 @@ if [ -z "$findings_source" ] && [ "$SOURCE" != "gh" ]; then
     [ -n "$SINCE" ] || SINCE="$(fm_get head_sha)"
     INCLUDED_UNCOMMITTED="$(fm_get included_uncommitted)"
     REVIEWED_SCOPE="$(fm_get scope)"
+
+    # The "latest" pointer is repo-wide, and a saved run is only about the branch
+    # it ran on. Review branch B, switch back to A, verify: without this, gate two
+    # loads B's findings and diffs A against B's head — every verdict is then
+    # about a change set nobody asked about, and it says so with the same
+    # confidence as a real one. The branch is in the frontmatter already; it was
+    # simply never read.
+    #
+    # An error rather than a warning, because the wrong answer here is indistinguishable
+    # from the right one downstream. Naming a run explicitly is taken as meaning it:
+    # verifying an older branch's run on purpose is a real thing to want, and the
+    # caller who typed the directory name already knows which one it is.
+    ART_BRANCH="$(fm_get branch)"
+    CUR_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '')"
+    if [ -n "$ART_BRANCH" ] && [ -n "$CUR_BRANCH" ] && [ "$ART_BRANCH" != "$CUR_BRANCH" ]; then
+      if [ "$CUR_BRANCH" = "HEAD" ] || [ "$ART_PINNED" = "1" ]; then
+        # Detached HEAD has no name to compare, and a pinned run was asked for by
+        # name. Both are the caller's call to make; say what is happening and go on.
+        log "WARN  : the saved review ran on '${ART_BRANCH}', and this checkout is not on it. Verifying anyway."
+      else
+        log "ERROR: the latest saved review ran on branch '${ART_BRANCH}', but you are on '${CUR_BRANCH}'."
+        log "       Its findings are about ${ART_BRANCH}'s changes, so verifying them here would"
+        log "       adjudicate the wrong diff and report verdicts with full confidence."
+        log "       Switch to ${ART_BRANCH}, or name the run you mean:"
+        log "         OPENCODE_REVIEW_VERIFY_RUN=${ART_DIR##*/} $0"
+        exit 1
+      fi
+    fi
   elif [ "$SOURCE" = "artifact" ]; then
     log "ERROR: no saved review found under \$(git rev-parse --git-dir)/opencode-review/."
     log "       Run run-review.sh first, or use OPENCODE_REVIEW_VERIFY_SOURCE=gh."
@@ -228,7 +282,12 @@ if [ -z "$findings_source" ]; then
     log "       Pass a PR number: run-verify.sh <pr-number>"
     exit 1
   }
-  gh_findings "$PR" >"$findings_file"
+  gh_findings "$PR" >"$findings_file" || {
+    log "       PR #${PR} was read only in part, so some findings would never be"
+    log "       adjudicated — and a finding nobody judged reads as one that passed."
+    log "       Retry, or pass a complete findings file with OPENCODE_REVIEW_VERIFY_FINDINGS."
+    exit 1
+  }
   [ -s "$findings_file" ] || {
     log "ERROR: PR #${PR} produced no body and no comments — there is nothing to verify."
     exit 1
@@ -257,15 +316,63 @@ git rev-parse --verify --quiet "${SINCE}^{commit}" >/dev/null || {
 }
 SINCE_SHORT="$(git rev-parse --short "$SINCE")"
 
+# A warning and not an error: history legitimately moves under a review. An amend,
+# a rebase or a squash while fixing leaves the reviewed commit off the current
+# branch without anything being wrong. But "git diff ${SINCE}" then spans the
+# divergence rather than the fix, so the model is reading more than the fix and
+# should be said so out loud rather than discovered in a strange verdict.
+if ! git merge-base --is-ancestor "$SINCE" HEAD 2>/dev/null; then
+  log "WARN  : ${SINCE_SHORT} is not an ancestor of HEAD (rebased, amended, or a different line of work)."
+  log "        The fix diff below therefore spans the divergence, not just the fix."
+fi
+
+# Untracked files are part of the fix as often as edits are — a finding answered
+# by adding a file looks like "no change" without this. `git diff` will not show
+# them without writing to the index, and this script never touches the index, so
+# the hunks are synthesized. Three shapes, because presenting one as another is a
+# verdict about a change that was not made:
+#
+#   symlink  `-f` is TRUE for a symlink to a regular file and the readers follow
+#            it, so the naive version shows an added link as a new regular file
+#            holding the TARGET's contents. git stores a symlink as a 120000-mode
+#            blob whose content is the target path; that is what is emitted.
+#   binary   `sed` on bytes that are not text fails outright ("illegal byte
+#            sequence" on BSD sed), and its stderr was discarded — so an added
+#            binary did not come out mangled, it vanished, and a finding fixed by
+#            adding one came back 未修正. Announced the way git announces it.
+#   text     read under LC_ALL=C so a file that is not valid in the ambient
+#            locale is still prefixed byte-wise rather than killing the reader.
+is_binary() { # git's own heuristic: a NUL byte in the first 8000 bytes
+  local n z
+  n="$(LC_ALL=C head -c 8000 "$1" 2>/dev/null | wc -c | tr -d ' ')"
+  z="$(LC_ALL=C head -c 8000 "$1" 2>/dev/null | LC_ALL=C tr -d '\000' | wc -c | tr -d ' ')"
+  [ "$n" != "$z" ]
+}
+
+emit_untracked() { # $1 path, relative to the repo root
+  local f="$1" target lines
+  if [ -L "$f" ]; then
+    target="$(readlink "$f" 2>/dev/null)"
+    printf '\ndiff --git a/%s b/%s\nnew file mode 120000\n--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n+%s\n\\ No newline at end of file\n' \
+      "$f" "$f" "$f" "$target"
+    return 0
+  fi
+  [ -f "$f" ] || return 0
+  printf '\ndiff --git a/%s b/%s\nnew file mode 100644\n' "$f" "$f"
+  if is_binary "$f"; then
+    printf 'Binary files /dev/null and b/%s differ\n' "$f"
+    return 0
+  fi
+  lines="$(LC_ALL=C awk 'END{print NR}' "$f" 2>/dev/null || printf '0')"
+  printf -- '--- /dev/null\n+++ b/%s\n@@ -0,0 +1,%s @@\n' "$f" "$lines"
+  LC_ALL=C sed 's/^/+/' "$f" 2>/dev/null
+}
+
 fix_diff_file="$WORK_DIR/fix.diff"
 {
   git diff "$SINCE" 2>/dev/null
-  # Untracked files are part of the fix as often as edits are — a finding
-  # answered by adding a file looks like "no change" without this.
   git ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r f; do
-    [ -f "$f" ] || continue
-    printf '\n--- /dev/null\n+++ b/%s\n' "$f"
-    sed 's/^/+/' "$f" 2>/dev/null
+    emit_untracked "$f"
   done
 } >"$fix_diff_file"
 
