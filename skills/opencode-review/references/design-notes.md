@@ -128,10 +128,12 @@ what `tester` is for.
   `go env`: the script has to run PATH-resolved `git` and `opencode` from the repo root
   before any permission set exists, but an optional convenience should not widen that.
 - **How the bash map is actually matched — measured (#46).** opencode matches it per *shell
-  segment*, splitting on `;`, `&&` and `|` and requiring every segment to hit an allow pattern on
-  its own. `cat f | wc -l` runs because both halves are allowed; `ls | xargs cat` is refused
-  because `xargs` is not. That split is what enforces the read-only set, and it has two
-  consequences worth stating plainly, because both were got wrong here for a long time:
+  segment*, splitting on `;`, `&`, `&&` and `|` and requiring every segment to hit an allow
+  pattern on its own. `cat f | wc -l` runs because both halves are allowed; `ls | xargs cat` is
+  refused because `xargs` is not. A single `&` splits like the rest — `ls & pwd` and `ls&pwd` were
+  both measured denied — so backgrounding is not a way around it either. That split is what
+  enforces the read-only set, and it has two consequences worth stating plainly, because both
+  were got wrong here for a long time:
   - `"*;*"`, `"*|*"` and `"*&*"` deny patterns are **dead**. The separator is consumed by the
     split, so no segment ever contains one. They sat in this map refusing nothing until #46
     removed them. What they *did* catch was a separator inside a quoted argument, which the split

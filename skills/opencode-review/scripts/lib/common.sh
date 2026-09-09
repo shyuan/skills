@@ -296,8 +296,9 @@ EXT_DIR_RULES="$(external_dirs_rules)"
 #     shell split leaves it in place: `git grep -n "A\|B"` — an ordinary
 #     alternation — was denied as if it were command chaining. In the run that
 #     produced the #46 evidence that misfire accounted for seven of eight
-#     denials and cost one seat its entire report. The personas now tell members
-#     to split multi-pattern greps into separate calls.
+#     denials and cost one seat its entire report. Removing the three patterns is
+#     what lets a multi-pattern grep through; single "&" is still refused, because
+#     opencode splits on it too (`ls & pwd` and `ls&pwd` were both measured denied).
 # The redirect, backtick, $(...) and <(...) denies are kept: those were measured
 # refusing what they are aimed at.
 PERM_BASH='{"*":"deny","git diff*":"allow","git show*":"allow","git log*":"allow","git status*":"allow","git ls-files*":"allow","git rev-parse*":"allow","git blame*":"allow","git grep*":"allow","cat *":"allow","head *":"allow","tail *":"allow","wc *":"allow","ls":"allow","ls *":"allow","grep *":"allow","rg *":"allow","*>*":"deny","*`*":"deny","*$(*":"deny","*<(*":"deny","*\n*":"deny"}'
