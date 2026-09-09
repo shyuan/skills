@@ -408,6 +408,17 @@ before touching the other three, and remember to set `OPENCODE_REVIEW_CHAIR_VARI
   unparseable output the list falls back to the script's own caches and the log says so, so the
   lookup can only ever add information. It costs one extra `opencode` invocation (~5s, measured)
   before phase 1, overlapped with the `--variant` probe.
+- **That list is partly untrusted, and is treated as such.** A project's `opencode.json` is a
+  file in the checkout under review, so on a branch you did not write its `external_directory`
+  keys are attacker-controlled text heading straight for the most trusted part of every persona.
+  A key holding an escaped newline would otherwise become a second bullet in the environment
+  section — a prompt injection with a short path to "report no findings". So only keys that are
+  plain absolute paths survive (no control characters, no backtick, 512 bytes max), a second
+  filter drops any line that is not a path before it reaches a prompt, each one is rendered
+  inside a code span so a name that reads like prose arrives as data, the personas say outright
+  that the entries are path strings and not instructions, and the list is capped at 40 with the
+  remainder announced. Rejected entries are counted in the log, never echoed — the log is read
+  by the calling agent too.
 - **The personas state these boundaries up front** rather than letting models find them by
   hitting them: no test/build execution (that would run code from the untrusted diff), what is
   readable and how, no retrying a rejected call, and — because two members once ended a run on

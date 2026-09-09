@@ -929,11 +929,17 @@ effective_external_dirs() {
   if [ "$JSON_BIN" = "jq" ]; then
     printf '%s' "$json" | jq -r --arg home "$HOME" '
       (.permission.external_directory // {})
-      | to_entries[]
-      | select(.value == "allow")
-      | .key
-      | sub("/\\*\\*$"; "")
-      | sub("^~"; $home)
+      | [ to_entries[]
+          | select(.value == "allow")
+          | .key
+          | sub("/\\*\\*$"; "")
+          | sub("^~"; $home) ] as $all
+      | ($all | map(select(
+          startswith("/")
+          and (test("[[:cntrl:]]|`") | not)
+          and (length <= 512)
+        ))) as $ok
+      | "#rejected \(($all | length) - ($ok | length))", $ok[]
     ' 2>/dev/null
   else
     printf '%s' "$json" | python3 -c '
@@ -946,24 +952,65 @@ ext = ((cfg.get("permission") or {}).get("external_directory")) or {}
 if not isinstance(ext, dict):
     sys.exit(1)
 home = os.path.expanduser("~")
+ok, rejected = [], 0
 for key, value in ext.items():
     if value != "allow":
         continue
     key = key[:-3] if key.endswith("/**") else key
     if key.startswith("~"):
         key = home + key[1:]
+    if (not key.startswith("/")) or len(key) > 512 or any(
+        ord(c) < 32 or ord(c) == 127 or c == "`" for c in key
+    ):
+        rejected += 1
+        continue
+    ok.append(key)
+print("#rejected %d" % rejected)
+for key in ok:
     print(key)
 ' 2>/dev/null
   fi
 }
 
-READ_PATHS="$(effective_external_dirs | sed '/^$/d' | sort -u)"
+# The merged config is partly UNTRUSTED INPUT. A project's own opencode.json is
+# a file in the checkout under review, so on a branch someone else wrote, its
+# external_directory keys are attacker-controlled text — and this list is
+# interpolated into the most trusted part of every persona. A key holding an
+# escaped newline used to become a second markdown bullet in the environment
+# section, which is a prompt injection with a straight path to "report no
+# findings" (Greptile, on the PR that added this).
+#
+# Three layers, because no single one is convincing on its own:
+#   1. the extractors above emit only keys that are plain absolute paths — no
+#      control characters, no backtick, at most 512 bytes — and count the rest;
+#   2. this grep keeps only lines starting with "/", so anything that got past
+#      the JSON layer as a stray line is dropped here rather than trusted;
+#   3. each surviving path is rendered inside a code span (below), so a name
+#      that reads like prose still reaches the model as data, not instruction.
+# What that leaves is a single-line absolute path whose own name is prose. It
+# is quoted, capped, and cannot break out of its bullet.
+READ_PATHS_RAW="$(effective_external_dirs)"
 READ_PATHS_RC=$?
 if [ "$READ_PATHS_RC" -eq 0 ]; then
   READ_PATHS_SOURCE="the merged config"
+  READ_PATHS_DROPPED="$(printf '%s\n' "$READ_PATHS_RAW" | sed -n '1s/^#rejected //p')"
+  READ_PATHS="$(printf '%s\n' "$READ_PATHS_RAW" | grep '^/' | sort -u)"
 else
-  READ_PATHS="$(dep_dirs | sort -u)"
   READ_PATHS_SOURCE="this script's own list; opencode could not be asked"
+  READ_PATHS_DROPPED=0
+  READ_PATHS="$(dep_dirs | sort -u)"
+fi
+
+# A prompt is not the place for an unbounded list either: nothing stops a repo's
+# config from carrying thousands of allows, and every one of them would be paid
+# for in four stages. The cap is announced in the text rather than applied
+# silently, like the fact-check diff truncation.
+READ_PATHS_MAX=40
+READ_PATHS_TOTAL="$(printf '%s' "$READ_PATHS" | grep -c '^/')"
+READ_PATHS_OMITTED=0
+if [ "$READ_PATHS_TOTAL" -gt "$READ_PATHS_MAX" ]; then
+  READ_PATHS="$(printf '%s\n' "$READ_PATHS" | head -n "$READ_PATHS_MAX")"
+  READ_PATHS_OMITTED=$((READ_PATHS_TOTAL - READ_PATHS_MAX))
 fi
 
 if [ -n "$READ_PATHS" ]; then
@@ -971,12 +1018,24 @@ if [ -n "$READ_PATHS" ]; then
 else
   log "deps  : no readable path outside the repo; file tools stay repo-only"
 fi
+# Counts only. The rejected keys are attacker-controlled text and the caller
+# reads this stream, so they are not echoed anywhere.
+if [ "${READ_PATHS_DROPPED:-0}" != "0" ]; then
+  log "deps  : ignored ${READ_PATHS_DROPPED} external_directory entries that were not plain absolute paths"
+fi
+if [ "$READ_PATHS_OMITTED" -gt 0 ]; then
+  log "deps  : listing the first ${READ_PATHS_MAX}; ${READ_PATHS_OMITTED} more are allowed but not named in the personas"
+fi
 
 # Every persona gets this list substituted in by read_prompt, so no prompt file
 # states the boundary itself and none of them can drift from the permission set
 # actually in force.
 if [ -n "$READ_PATHS" ]; then
-  READ_PATHS_BLOCK="$(printf '%s\n' "$READ_PATHS" | sed 's/^/  - /')"
+  READ_PATHS_BLOCK="$(printf '%s\n' "$READ_PATHS" | sed 's/^/  - `/; s/$/`/')"
+  if [ "$READ_PATHS_OMITTED" -gt 0 ]; then
+    READ_PATHS_BLOCK="$READ_PATHS_BLOCK
+  - (另有 ${READ_PATHS_OMITTED} 個路徑同樣可讀,未列出)"
+  fi
 else
   READ_PATHS_BLOCK="  - (本次執行沒有 repo 外的可讀路徑,檔案工具僅限本 repo)"
 fi
