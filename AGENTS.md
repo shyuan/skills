@@ -30,8 +30,11 @@ Flat structure — one level of skill folders under `skills/`, no category bucke
 - The folder name **equals** the `name` in frontmatter, in lowercase-kebab-case.
 - Every skill is listed in the **Skills** table in [README.md](./README.md), with its name linked
   to its folder. Adding or removing a skill means updating that table in the same change.
-- Scripts are committed with the executable bit set (`git ls-files -s` shows `100755`), so they run
-  after a clone.
+- Scripts that are **invoked** are committed with the executable bit set (`git ls-files -s` shows
+  `100755`), so they run after a clone. Files that are **sourced** rather than run — a
+  `scripts/lib/*.sh` shared by two entry points, say — stay `100644`: the bit is what tells a
+  reader which files are entry points, and setting it on a library says the wrong thing about a
+  file that has no `main`.
 - Machine-local agent config (e.g. `.claude/settings.local.json`) is never committed; it is
   gitignored. Don't add it back.
 

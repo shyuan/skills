@@ -106,12 +106,12 @@ PROVIDER_PREFIX="${PROVIDER:+${PROVIDER}/}"
 # associative array because macOS ships bash 3.2, which has none.
 #
 # Every seat sits on the cheap tier of its family and buys quality back with
-# reasoning effort rather than with a bigger model — see SKILL.md, "Why these
-# models". The four members deliberately run four DIFFERENT families: the whole
-# argument for a committee is blind-spot diversity, and two seats on one family
-# is one seat that costs twice. The two opt-in seats reuse ids the chair and
-# fact-check stages already use, so switching them on adds no new provider
-# dependency — a setup that can run this skill at all can run them.
+# reasoning effort rather than with a bigger model — see references/design-notes.md,
+# "Why these models". The four members deliberately run four DIFFERENT families,
+# the chair a fifth and the fact-check a sixth: the whole argument for a
+# committee is blind-spot diversity, two seats on one family is one seat that
+# costs twice, and a stage that judges another stage's output must not be the
+# model that produced it.
 #
 # ORTHOGONALITY IS THE ADMISSION TEST, not usefulness. The chair treats "two
 # members raised this" as a confidence signal, so a seat that overlaps an
